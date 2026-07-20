@@ -1528,6 +1528,52 @@ def test_meter_card_header_and_row_styling():
     assert any("2d" in t for t in texts_with_style(SEV_CRIT))
 
 
+def test_meter_card_flash_highlights_top_border():
+    from claude_swap.tui.widgets import meter_card
+    from claude_swap.tui.theme import ACCENT
+
+    acc = make_account(
+        1, active=True, email="work@acme.dev", entry=make_entry(pct5=78.0, pct7=34.0)
+    )
+    now = time.time()
+    plain = meter_card(acc, 21, 5, now=now)
+    flashed = meter_card(acc, 21, 5, now=now, flash=True)
+
+    # flash never changes layout or text, only the top border's style
+    assert plain.plain == flashed.plain
+    lines = flashed.plain.split("\n")
+    assert len(lines) == 5 + 6
+    assert all(len(ln) == 21 for ln in lines)
+
+    header_end = len(lines[0])
+    flash_style = f"bold {ACCENT}"
+    assert any(
+        sp.start == 0 and sp.end == header_end and sp.style == flash_style
+        for sp in flashed.spans
+    )
+    assert not any(
+        sp.start == 0 and sp.end == header_end and sp.style == flash_style
+        for sp in plain.spans
+    )
+
+
+def test_meters_grid_text_flash_marks_only_flashed_account():
+    from claude_swap.tui.theme import ACCENT
+    from claude_swap.tui.widgets import meters_grid_text
+
+    accounts = _make_three_meter_accounts()
+    flash_style = f"bold {ACCENT}"
+
+    plain_out = meters_grid_text(accounts, 44, 16, now=time.time())
+    assert not [sp for sp in plain_out.spans if sp.style == flash_style]
+
+    flashed_out = meters_grid_text(
+        accounts, 44, 16, now=time.time(), flashed={accounts[1].number}
+    )
+    assert flashed_out.plain == plain_out.plain  # flash never changes layout/text
+    assert len([sp for sp in flashed_out.spans if sp.style == flash_style]) == 1
+
+
 def test_fit_center_truncates_oversized_content():
     from claude_swap.tui.widgets import _fit_center
 

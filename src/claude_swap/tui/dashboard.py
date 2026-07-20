@@ -203,9 +203,8 @@ def _active_index(snap: AccountsSnapshot) -> int:
 class AccountListScreen(Screen):
     """Shared machinery: a live ListView of full account cards.
 
-    Subclasses decide what the cursor does — :class:`SwitchScreen` is
-    selection-first, :class:`WatchScreen` is a monitor that can arm
-    selection on demand.
+    :class:`SwitchScreen` is the sole subclass — arrows pick, Enter
+    switches.
     """
 
     app: "CswapApp"

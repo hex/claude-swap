@@ -9,6 +9,7 @@ auto-switch trigger line), and stale-measurement dimming.
 from __future__ import annotations
 
 import time
+from functools import partial
 from typing import TYPE_CHECKING
 
 from rich.text import Text
@@ -16,7 +17,7 @@ from textual.widgets import ListItem, Static
 
 from claude_swap import pace
 from claude_swap.json_output import USAGE_API_KEY
-from claude_swap.models import AccountSnapshot
+from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.usage_store import STALE_OK_S
 from claude_swap.tui import data
 from claude_swap.tui.theme import (
@@ -37,6 +38,8 @@ _BAR_FILLED = "━"
 _BAR_HALF = "╸"
 _BAR_EMPTY = "─"
 _BAR_TICK = "┃"
+
+_FLASH_S = 1.5  # how long a just-refreshed card's border stays highlighted
 
 
 def bar_cells(
@@ -324,15 +327,20 @@ def meter_card(
     bar_height: int,
     *,
     now: float,
+    flash: bool = False,
 ) -> Text:
     """A framed vertical-meter card: header, one bar column per window, and
     baseline/label/percent/reset rows beneath. Always ``bar_height + 6``
     lines of exactly ``card_width`` columns — used by the watch screen's
-    meter grid."""
+    meter grid. ``flash`` highlights the top border to signal a just-refreshed
+    measurement."""
     interior_width = card_width - 2
     bottom_border = "╰" + "─" * (card_width - 2) + "╯"
     text = Text()
-    text.append(_meter_header(acc, card_width))
+    header = _meter_header(acc, card_width)
+    if flash:
+        header = Text(header.plain, style=f"bold {ACCENT}")
+    text.append(header)
 
     if acc.usage.sentinel is not None:
         windows = []
@@ -455,20 +463,23 @@ def meters_grid_text(
     *,
     cursor: int | None = None,
     now: float,
-    threshold: float | None = None,
+    flashed: set[str] | None = None,
 ) -> Text:
     """The watch screen's tiled meter grid: every account as a
     :func:`meter_card`, ``ncols`` per row with a one-space gutter, rows
     separated by a blank line. ``cursor`` marks that account's card as
-    selected. ``threshold`` is accepted for interface parity with
-    :func:`account_card_text` — :func:`meter_card`'s vertical bars don't
-    render a threshold tick, so it is currently unused here.
+    selected; ``flashed`` account numbers get their card's top border
+    highlighted.
     """
     if not accounts:
         return Text("no accounts", style=MUTED)
 
+    flashed = flashed or set()
     ncols, card_width, bar_height = meter_grid_dims(width, height, len(accounts))
-    cards = [meter_card(acc, card_width, bar_height, now=now) for acc in accounts]
+    cards = [
+        meter_card(acc, card_width, bar_height, now=now, flash=acc.number in flashed)
+        for acc in accounts
+    ]
     if cursor is not None and 0 <= cursor < len(cards):
         cards[cursor] = _mark_cursor(cards[cursor], card_width)
 
@@ -684,9 +695,34 @@ class MetersGrid(Static):
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.cursor: int | None = None
+        self._stamps: dict[str, float | None] = {}
+        self._flash: set[str] = set()
 
     def on_mount(self) -> None:
-        self.watch(self.app, "snapshot", lambda _snap: self.refresh(layout=True))
+        self.watch(self.app, "snapshot", self._on_snapshot)
+
+    def _on_snapshot(self, snap: AccountsSnapshot | None) -> None:
+        if snap is not None:
+            self._flash_updated(snap)
+        self.refresh(layout=True)
+
+    def _flash_updated(self, snap: AccountsSnapshot) -> None:
+        """Briefly highlight cards whose stored measurement just advanced."""
+        new_stamps = {acc.number: acc.usage.fetched_at for acc in snap.accounts}
+        if self._stamps:
+            changed = {
+                num
+                for num, ts in new_stamps.items()
+                if ts is not None and ts != self._stamps.get(num)
+            } - self._flash
+            if changed:
+                self._flash |= changed
+                self.set_timer(_FLASH_S, partial(self._clear_flash, changed))
+        self._stamps = new_stamps
+
+    def _clear_flash(self, numbers: set[str]) -> None:
+        self._flash -= numbers
+        self.refresh(layout=True)
 
     def render(self) -> Text:
         app: "CswapApp" = self.app  # type: ignore[assignment]
@@ -701,7 +737,7 @@ class MetersGrid(Static):
             self.size.height,
             cursor=self.cursor,
             now=time.time(),
-            threshold=getattr(app, "threshold_pct", None),
+            flashed=self._flash,
         )
 
     def _ncols(self) -> int:
