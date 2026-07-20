@@ -22,7 +22,7 @@ from claude_swap.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui import data as tui_data
-from claude_swap.tui.widgets import bar_v, gradient_color, meter_windows
+from claude_swap.tui.widgets import bar_v, gradient_color, meter_grid_dims, meter_windows
 from claude_swap.usage_store import UsageEntry
 
 
@@ -1400,3 +1400,19 @@ def test_meter_windows_order_and_fields():
     assert [r[1] for r in rows] == [78.0, 34.0, 100.0]
     assert [r[3] for r in rows] == [False, False, True]
     assert meter_windows(None, now) == []
+
+
+def test_meter_grid_dims_fluid():
+    from claude_swap.tui.widgets import meter_grid_dims
+    # 44x16, 3 accounts -> 2 columns, card_width (44-1)//2
+    ncols, cw, bh = meter_grid_dims(44, 16, 3)
+    assert ncols == 2
+    assert cw == 21
+    # 96x34, 3 accounts -> 3 columns, card_width (96-2)//3
+    ncols, cw, bh = meter_grid_dims(96, 34, 3)
+    assert ncols == 3
+    assert cw == 31
+    # narrow: single column, bar floor respected
+    ncols, cw, bh = meter_grid_dims(30, 12, 3)
+    assert ncols == 1
+    assert bh >= 3

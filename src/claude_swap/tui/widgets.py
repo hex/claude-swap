@@ -235,6 +235,24 @@ def meter_windows(
     return out
 
 
+def meter_grid_dims(
+    width: int,
+    height: int,
+    n_accounts: int,
+    *,
+    min_card_w: int = 20,
+    bar_min: int = 3,
+    card_chrome: int = 6,
+) -> tuple[int, int, int]:
+    """(ncols, card_width, bar_height) for the meter grid at this terminal size."""
+    n = max(1, n_accounts)
+    ncols = max(1, min((width + 1) // min_card_w, n))
+    card_width = (width - (ncols - 1)) // ncols
+    rows_of_cards = -(-n // ncols)  # ceil
+    bar_height = max(bar_min, height // rows_of_cards - card_chrome)
+    return ncols, card_width, bar_height
+
+
 def account_card_text(
     acc: AccountSnapshot,
     width: int,
