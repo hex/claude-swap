@@ -1513,3 +1513,66 @@ def test_fit_center_truncates_oversized_content():
         result = _fit_center(long_label, w)
         assert len(result) == w
     assert _fit_center(long_label, 4) == "Anth"
+
+
+def test_grid_move_clamps_and_no_wrap():
+    from claude_swap.tui.widgets import grid_move
+
+    # 3 items, 2 cols -> layout [0,1 / 2]
+    assert grid_move(0, 1, 0, 2, 3) == 1  # right
+    assert grid_move(1, 1, 0, 2, 3) == 1  # right at edge: clamp (no wrap)
+    assert grid_move(0, 0, 1, 2, 3) == 2  # down
+    assert grid_move(0, -1, 0, 2, 3) == 0  # left at edge: clamp
+    assert grid_move(2, 0, -1, 2, 3) == 0  # up
+    # short last row: moving down from col 1 lands on the only item in row 1
+    assert grid_move(1, 0, 1, 2, 3) == 2
+
+
+def _make_three_meter_accounts() -> list[AccountSnapshot]:
+    return [
+        make_account(1, active=True, email="a@example.com", entry=make_entry(pct5=78.0, pct7=34.0)),
+        make_account(2, email="b@example.com", entry=make_entry(pct5=50.0, pct7=10.0)),
+        make_account(3, email="c@example.com", entry=make_entry(pct5=20.0, pct7=5.0)),
+    ]
+
+
+def test_meters_grid_text_two_columns():
+    from claude_swap.tui.widgets import meters_grid_text
+
+    accounts = _make_three_meter_accounts()
+    out = meters_grid_text(accounts, 44, 16, now=time.time())
+    lines = out.plain.split("\n")
+    assert lines[0].count("╭") == 2  # two cards side by side on row 1
+
+
+def test_meters_grid_text_rows_separated_by_blank_line():
+    from claude_swap.tui.widgets import meter_grid_dims, meters_grid_text
+
+    accounts = _make_three_meter_accounts()
+    out = meters_grid_text(accounts, 44, 16, now=time.time())
+    lines = out.plain.split("\n")
+    _ncols, _cw, bar_height = meter_grid_dims(44, 16, len(accounts))
+    card_lines = bar_height + 6
+    assert lines[card_lines] == ""  # blank separator between card rows
+    assert lines[card_lines + 1].count("╭") == 1  # lone third card on row 2
+
+
+def test_meters_grid_text_cursor_marks_selected_card():
+    from claude_swap.tui.theme import ACCENT
+    from claude_swap.tui.widgets import meters_grid_text
+
+    accounts = _make_three_meter_accounts()
+    plain_out = meters_grid_text(accounts, 44, 16, now=time.time())
+    marked_out = meters_grid_text(accounts, 44, 16, cursor=0, now=time.time())
+    assert plain_out.plain == marked_out.plain  # marking never changes layout/text
+    accent_spans_plain = [sp for sp in plain_out.spans if sp.style == ACCENT]
+    accent_spans_marked = [sp for sp in marked_out.spans if sp.style == ACCENT]
+    assert len(accent_spans_marked) > len(accent_spans_plain)
+
+
+def test_meters_grid_text_empty_accounts():
+    from claude_swap.tui.widgets import meters_grid_text
+
+    out = meters_grid_text([], 44, 16, now=time.time())
+    assert isinstance(out.plain, str)
+    assert out.plain

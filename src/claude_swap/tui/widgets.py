@@ -406,6 +406,89 @@ def meter_card(
     return text
 
 
+def grid_move(cursor: int, dx: int, dy: int, ncols: int, n: int) -> int:
+    """New row-major index after moving ``(dx, dy)`` across an ``ncols``-wide
+    grid of ``n`` items, clamped to the grid's bounds — never wraps, and a
+    short last row clamps to its own last column rather than the grid's."""
+    ncols = max(1, ncols)
+    n = max(0, n)
+    if n == 0:
+        return cursor
+    cursor = max(0, min(n - 1, cursor))
+    row, col = divmod(cursor, ncols)
+    nrows = -(-n // ncols)
+    new_row = max(0, min(nrows - 1, row + dy))
+    row_start = new_row * ncols
+    row_len = min(ncols, n - row_start)
+    new_col = max(0, min(row_len - 1, col + dx))
+    return row_start + new_col
+
+
+def _line_spans(card: Text) -> list[tuple[int, int]]:
+    """``[(start, end), ...]`` character offsets of each line in ``card``,
+    excluding the ``\\n`` separators — for slicing a line back out of the
+    multi-line :class:`Text` while keeping its per-character styles."""
+    spans = []
+    start = 0
+    for line in card.plain.split("\n"):
+        end = start + len(line)
+        spans.append((start, end))
+        start = end + 1
+    return spans
+
+
+def _mark_cursor(card: Text, card_width: int) -> Text:
+    """Recolor a card's left/right border edges to ACCENT to mark it selected."""
+    marked = card.copy()
+    offset = 0
+    for line in card.plain.split("\n"):
+        marked.stylize(ACCENT, offset, offset + 1)
+        marked.stylize(ACCENT, offset + card_width - 1, offset + card_width)
+        offset += len(line) + 1
+    return marked
+
+
+def meters_grid_text(
+    accounts: list[AccountSnapshot],
+    width: int,
+    height: int,
+    *,
+    cursor: int | None = None,
+    now: float,
+    threshold: float | None = None,
+) -> Text:
+    """The watch screen's tiled meter grid: every account as a
+    :func:`meter_card`, ``ncols`` per row with a one-space gutter, rows
+    separated by a blank line. ``cursor`` marks that account's card as
+    selected. ``threshold`` is accepted for interface parity with
+    :func:`account_card_text` — :func:`meter_card`'s vertical bars don't
+    render a threshold tick, so it is currently unused here.
+    """
+    if not accounts:
+        return Text("no accounts", style=MUTED)
+
+    ncols, card_width, bar_height = meter_grid_dims(width, height, len(accounts))
+    cards = [meter_card(acc, card_width, bar_height, now=now) for acc in accounts]
+    if cursor is not None and 0 <= cursor < len(cards):
+        cards[cursor] = _mark_cursor(cards[cursor], card_width)
+
+    text = Text()
+    for row_start in range(0, len(cards), ncols):
+        row_cards = cards[row_start : row_start + ncols]
+        if row_start:
+            text.append("\n\n")
+        row_line_spans = [_line_spans(card) for card in row_cards]
+        for line_idx in range(len(row_line_spans[0])):
+            if line_idx:
+                text.append("\n")
+            for col_idx, card in enumerate(row_cards):
+                if col_idx:
+                    text.append(" ")
+                start, end = row_line_spans[col_idx][line_idx]
+                text.append(card[start:end])
+    return text
+
+
 def account_card_text(
     acc: AccountSnapshot,
     width: int,
@@ -592,6 +675,63 @@ class AccountsPanel(Static):
             text.append(block)
             previous_multiline = multiline
         return text
+
+
+class MetersGrid(Static):
+    """The watch screen's tiled vertical-meter grid, with a keyboard-navigable
+    cursor over the accounts."""
+
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.cursor: int | None = None
+
+    def on_mount(self) -> None:
+        self.watch(self.app, "snapshot", lambda _snap: self.refresh(layout=True))
+
+    def render(self) -> Text:
+        app: "CswapApp" = self.app  # type: ignore[assignment]
+        snap = app.snapshot
+        if snap is None:
+            return Text("loading…", style=MUTED)
+        if not snap.accounts:
+            return Text("No managed accounts yet.", style=MUTED)
+        return meters_grid_text(
+            snap.accounts,
+            self.size.width - 2,
+            self.size.height,
+            cursor=self.cursor,
+            now=time.time(),
+            threshold=getattr(app, "threshold_pct", None),
+        )
+
+    def _ncols(self) -> int:
+        app: "CswapApp" = self.app  # type: ignore[assignment]
+        snap = app.snapshot
+        n = len(snap.accounts) if snap else 0
+        if n == 0:
+            return 1
+        ncols, _card_width, _bar_height = meter_grid_dims(
+            self.size.width - 2, self.size.height, n
+        )
+        return ncols
+
+    def move_cursor(self, dx: int, dy: int) -> None:
+        app: "CswapApp" = self.app  # type: ignore[assignment]
+        snap = app.snapshot
+        n = len(snap.accounts) if snap else 0
+        if n == 0:
+            return
+        self.cursor = grid_move(self.cursor or 0, dx, dy, self._ncols(), n)
+        self.refresh(layout=True)
+
+    def selected_number(self) -> str | None:
+        app: "CswapApp" = self.app  # type: ignore[assignment]
+        snap = app.snapshot
+        if snap is None or self.cursor is None:
+            return None
+        if not 0 <= self.cursor < len(snap.accounts):
+            return None
+        return snap.accounts[self.cursor].number
 
 
 class AccountCard(Static):
