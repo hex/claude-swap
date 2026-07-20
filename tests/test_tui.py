@@ -934,18 +934,44 @@ class TestWatchScreen:
             await settle(pilot)
             await pilot.press("w")
             await pilot.pause()
-            from textual.widgets import ListView
-
             from claude_swap.tui.dashboard import WatchScreen
-            from claude_swap.tui.widgets import AccountItem
+            from claude_swap.tui.widgets import MetersGrid
 
             assert isinstance(app.screen, WatchScreen)
-            listview = app.screen.query_one("#accounts", ListView)
-            assert len(list(listview.query(AccountItem))) == 2  # full cards
-            assert listview.index is None  # monitor mode: no cursor
+            grid = app.screen.query_one("#meters", MetersGrid)
+            assert grid.cursor is None  # monitor mode: no cursor
             await pilot.press("enter")  # inert while just watching
             await settle(pilot)
             assert not any(call[0] == "switch_to" for call in fake_calls(app))
+
+    async def test_s_arms_selection_at_active_index(self, tmp_path):
+        app = make_app(self._fake(tmp_path))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            from claude_swap.tui.widgets import MetersGrid
+
+            grid = app.screen.query_one("#meters", MetersGrid)
+            assert grid.cursor == 0  # armed on the active account
+
+    async def test_nav_right_moves_cursor_one(self, tmp_path):
+        app = make_app(self._fake(tmp_path))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            from claude_swap.tui.widgets import MetersGrid
+
+            grid = app.screen.query_one("#meters", MetersGrid)
+            assert grid.cursor == 0
+            await pilot.press("l")  # two accounts side by side at this width
+            await pilot.pause()
+            assert grid.cursor == 1
 
     async def test_s_arms_selection_switch_stays_watching(self, tmp_path):
         fake = self._fake(tmp_path)
@@ -956,17 +982,15 @@ class TestWatchScreen:
             await pilot.pause()
             await pilot.press("s")
             await pilot.pause()
-            from textual.widgets import ListView
-
             from claude_swap.tui.dashboard import WatchScreen
+            from claude_swap.tui.widgets import MetersGrid
 
-            listview = app.screen.query_one("#accounts", ListView)
-            assert listview.index == 0  # cursor armed, on the active account
-            await pilot.press("down", "enter")
+            await pilot.press("l", "enter")
             await settle(pilot)
             assert ("switch_to", "2") in fake.calls
             assert isinstance(app.screen, WatchScreen)  # stayed watching
-            assert app.screen.query_one("#accounts", ListView).index is None
+            grid = app.screen.query_one("#meters", MetersGrid)
+            assert grid.cursor is None  # disarmed after switch
             assert app.snapshot.active_number == "2"
 
     async def test_escape_disarms_then_leaves(self, tmp_path):
@@ -980,12 +1004,11 @@ class TestWatchScreen:
             await pilot.pause()
             await pilot.press("escape")  # disarm selection only
             await pilot.pause()
-            from textual.widgets import ListView
-
             from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
+            from claude_swap.tui.widgets import MetersGrid
 
             assert isinstance(app.screen, WatchScreen)
-            assert app.screen.query_one("#accounts", ListView).index is None
+            assert app.screen.query_one("#meters", MetersGrid).cursor is None
             await pilot.press("escape")  # now leave
             await pilot.pause()
             assert isinstance(app.screen, DashboardScreen)

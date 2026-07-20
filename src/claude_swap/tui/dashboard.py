@@ -26,7 +26,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, ListView, Static
 
 from claude_swap.models import AccountsSnapshot
-from claude_swap.tui.widgets import AccountItem, AccountsPanel, MenuItem
+from claude_swap.tui.widgets import AccountItem, AccountsPanel, MenuItem, MetersGrid
 
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
@@ -193,6 +193,13 @@ class DashboardScreen(Screen):
         self.query_one("#menu", ListView).action_cursor_up()
 
 
+def _active_index(snap: AccountsSnapshot) -> int:
+    return next(
+        (i for i, acc in enumerate(snap.accounts) if acc.number == snap.active_number),
+        0,
+    )
+
+
 class AccountListScreen(Screen):
     """Shared machinery: a live ListView of full account cards.
 
@@ -242,18 +249,8 @@ class AccountListScreen(Screen):
     ) -> int | None:
         """Where the cursor lands after the list is (re)built."""
         if first_build:
-            return self._active_index(snap)
+            return _active_index(snap)
         return min(previous or 0, len(snap.accounts) - 1)
-
-    def _active_index(self, snap: AccountsSnapshot) -> int:
-        return next(
-            (
-                i
-                for i, acc in enumerate(snap.accounts)
-                if acc.number == snap.active_number
-            ),
-            0,
-        )
 
     def _flash_updated(self, snap: AccountsSnapshot, listview: ListView) -> None:
         """Briefly highlight rows whose stored measurement just advanced."""
@@ -311,13 +308,15 @@ class SwitchScreen(AccountListScreen):
         self.app.pop_screen()
 
 
-class WatchScreen(AccountListScreen):
+class WatchScreen(Screen):
     """Live monitor of every account, full detail, hands-off by default.
 
     ``s`` arms selection (cursor appears on the active account); Enter then
     switches and stays here — you keep watching on the new account. Esc
     disarms selection first, then leaves the screen.
     """
+
+    app: "CswapApp"
 
     _WATCH_TITLE = "watching all accounts"
     _SELECT_TITLE = "switch to which account? · enter confirm · esc cancel"
@@ -327,60 +326,53 @@ class WatchScreen(AccountListScreen):
         Binding("enter", "select_highlighted", "Confirm", priority=True),
         Binding("f", "app.refresh_full", "Refresh", show=False),
         Binding("escape,q", "back", "Back"),
-        Binding("down,j", "nav_down", show=False),
+        Binding("left,h", "nav_left", show=False),
+        Binding("right,l", "nav_right", show=False),
         Binding("up,k", "nav_up", show=False),
+        Binding("down,j", "nav_down", show=False),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self._selecting = False
 
+    def compose(self) -> ComposeResult:
+        yield Static("", id="list-title")
+        yield MetersGrid(id="meters")
+        yield Footer()
+
     def on_mount(self) -> None:
         self.query_one("#list-title", Static).update(self._WATCH_TITLE)
-        super().on_mount()
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action == "select_highlighted" and not self._selecting:
             return False  # hidden and inert until selection is armed
         return True
 
-    def _index_after_build(
-        self, snap: AccountsSnapshot, first_build: bool, previous: int | None
-    ) -> int | None:
-        if not self._selecting:
-            return None  # monitor mode: no cursor at all
-        return super()._index_after_build(snap, first_build, previous)
-
     def _set_selecting(self, on: bool) -> None:
-        self._selecting = on
-        listview = self.query_one("#accounts", ListView)
+        grid = self.query_one("#meters", MetersGrid)
         title = self.query_one("#list-title", Static)
         if on:
             snap = self.app.snapshot
-            if snap is not None and snap.accounts:
-                listview.index = self._active_index(snap)
-            listview.focus()
+            grid.cursor = _active_index(snap) if snap and snap.accounts else 0
             title.update(self._SELECT_TITLE)
         else:
-            listview.index = None
-            self.set_focus(None)
+            grid.cursor = None
             title.update(self._WATCH_TITLE)
+        self._selecting = on
         self.refresh_bindings()
+        grid.refresh(layout=True)
 
     def action_toggle_select(self) -> None:
         self._set_selecting(not self._selecting)
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        if not self._selecting:
-            return  # e.g. a stray click while just watching
-        item = event.item
-        if isinstance(item, AccountItem):
-            self.app.do_switch(item.number)
-            self._set_selecting(False)  # stay here, keep watching
-
     def action_select_highlighted(self) -> None:
-        if self._selecting:
-            self.query_one("#accounts", ListView).action_select_cursor()
+        if not self._selecting:
+            return
+        num = self.query_one("#meters", MetersGrid).selected_number()
+        if num:
+            self.app.do_switch(num)
+        self._set_selecting(False)  # stay here, keep watching
 
     def action_back(self) -> None:
         if self._selecting:
@@ -388,16 +380,18 @@ class WatchScreen(AccountListScreen):
         else:
             self.app.pop_screen()
 
-    def action_nav_down(self) -> None:
-        listview = self.query_one("#accounts", ListView)
+    def action_nav_left(self) -> None:
         if self._selecting:
-            listview.action_cursor_down()
-        else:
-            listview.scroll_down(animate=False)
+            self.query_one("#meters", MetersGrid).move_cursor(-1, 0)
+
+    def action_nav_right(self) -> None:
+        if self._selecting:
+            self.query_one("#meters", MetersGrid).move_cursor(1, 0)
 
     def action_nav_up(self) -> None:
-        listview = self.query_one("#accounts", ListView)
         if self._selecting:
-            listview.action_cursor_up()
-        else:
-            listview.scroll_up(animate=False)
+            self.query_one("#meters", MetersGrid).move_cursor(0, -1)
+
+    def action_nav_down(self) -> None:
+        if self._selecting:
+            self.query_one("#meters", MetersGrid).move_cursor(0, 1)
