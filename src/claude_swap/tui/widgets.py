@@ -77,17 +77,19 @@ def bar_cells(
 
 
 _GRAD_STOPS = ((0.0, SEV_OK), (0.5, SEV_WARN), (1.0, SEV_CRIT))
+# A maxed window's bar stays entirely in reds — dark at the base, hot at the
+# ceiling — so a limit that's been hit never reads as calm green at the bottom.
+_RED_STOPS = ((0.0, "#7a2e2e"), (1.0, "#ff6b6b"))
 
 
 def _hex_rgb(h: str) -> tuple[int, int, int]:
     return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
 
 
-def gradient_color(t: float) -> str:
-    """Colour for a bar cell at height fraction ``t`` (0 bottom .. 1 top):
-    interpolates SEV_OK → SEV_WARN → SEV_CRIT."""
+def _interp(stops: tuple, t: float) -> str:
+    """Interpolate a hex colour along ``stops`` at fraction ``t`` (clamped)."""
     t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
-    for (t0, c0), (t1, c1) in zip(_GRAD_STOPS, _GRAD_STOPS[1:]):
+    for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
         if t <= t1:
             f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
             r0, g0, b0 = _hex_rgb(c0)
@@ -97,7 +99,19 @@ def gradient_color(t: float) -> str:
                 round(g0 + (g1 - g0) * f),
                 round(b0 + (b1 - b0) * f),
             )
-    return SEV_CRIT
+    return stops[-1][1]
+
+
+def gradient_color(t: float) -> str:
+    """Colour for a bar cell at height fraction ``t`` (0 bottom .. 1 top):
+    interpolates SEV_OK → SEV_WARN → SEV_CRIT."""
+    return _interp(_GRAD_STOPS, t)
+
+
+def _bar_color(pct: float, t: float) -> str:
+    """Bar-cell colour: shades of red once the window is maxed (>=100%),
+    otherwise the green → amber → red climb."""
+    return _interp(_RED_STOPS, t) if pct >= 100 else gradient_color(t)
 
 
 _V_EIGHTHS = " ▁▂▃▄▅▆▇█"  # index 0..8, empty → full
@@ -405,29 +419,30 @@ def meter_card(
         return _to_exact_width(text, card_width)
 
     widths = _cell_widths(interior_width, len(windows))
-    # Each window's full bar column + its bar glyph width, computed once.
+    # Each window's full bar column, its bar glyph width, and its pct (for the
+    # per-window colour ramp) — computed once.
     bars = [
-        (bar_v(pct, bar_height), _meter_bar_width(w))
+        (bar_v(pct, bar_height), _meter_bar_width(w), pct)
         for w, (_label, pct, _reset, _maxed) in zip(widths, windows)
     ]
 
     for r in range(bar_height):
         frac = (bar_height - 1 - r) / (bar_height - 1) if bar_height > 1 else 0.0
-        color = f"{gradient_color(frac)} dim" if stale else gradient_color(frac)
         text.append("\n")
         text.append("│", style=MUTED)
-        for w, (glyphs, bar_w) in zip(widths, bars):
+        for w, (glyphs, bar_w, pct) in zip(widths, bars):
             glyph = glyphs[r]
             run = _fit_center(glyph * bar_w, w)
             if glyph == " ":
                 text.append(run)
             else:
-                text.append(run, style=color)
+                color = _bar_color(pct, frac)
+                text.append(run, style=f"{color} dim" if stale else color)
         text.append("│", style=MUTED)
 
     text.append("\n")
     text.append("│", style=MUTED)
-    for w, (_glyphs, bar_w) in zip(widths, bars):
+    for w, (_glyphs, bar_w, _pct) in zip(widths, bars):
         text.append(_fit_center("─" * bar_w, w), style=TRACK)
     text.append("│", style=MUTED)
 

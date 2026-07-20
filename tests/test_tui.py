@@ -1471,6 +1471,22 @@ class TestBareInvocation:
         assert launched["start"] == "watch"
 
 
+def test_bar_color_maxed_is_all_red_else_green_climb():
+    from claude_swap.tui.widgets import _bar_color, gradient_color
+    from claude_swap.tui.theme import SEV_OK
+
+    # A maxed window's whole bar is red-dominant (no calm green at the base)
+    for t in (0.0, 0.5, 1.0):
+        c = _bar_color(100.0, t)
+        r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
+        assert r > g and r > b, (t, c)
+    assert _bar_color(100.0, 0.0) != gradient_color(0.0)  # maxed base != green
+
+    # Below 100%, the bar keeps the green→amber→red climb (green at the base)
+    assert _bar_color(50.0, 0.0) == SEV_OK
+    assert _bar_color(50.0, 1.0) == gradient_color(1.0)
+
+
 def test_gradient_color_hits_stops_and_interpolates():
     assert gradient_color(0.0) == "#87af87"   # SEV_OK
     assert gradient_color(0.5) == "#d7af5f"   # SEV_WARN
