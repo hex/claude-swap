@@ -253,6 +253,135 @@ def meter_grid_dims(
     return ncols, card_width, bar_height
 
 
+def _cell_widths(interior_width: int, n_windows: int) -> list[int]:
+    """Split ``interior_width`` into ``n_windows`` cells, remainder spread
+    across the leftmost cells so the widths sum to ``interior_width``."""
+    base, remainder = divmod(interior_width, n_windows)
+    return [base + (1 if i < remainder else 0) for i in range(n_windows)]
+
+
+def _meter_bar_width(cell_width: int) -> int:
+    return max(1, min(cell_width - 2, 5))
+
+
+def _fit_center(s: str, width: int) -> str:
+    """Center ``s`` in ``width`` columns, truncating first so the result is
+    always exactly ``width`` wide even when ``s`` is longer than the cell."""
+    return s[:width].center(width)
+
+
+def _meter_header(acc: AccountSnapshot, card_width: int) -> Text:
+    """``╭─┤ {number} {name} {● if active}├────╮`` truncating name to fit."""
+    text = Text()
+    number = str(acc.number)
+    name = acc.email.split("@", 1)[0]
+    active_suffix = " ●" if acc.is_active else ""
+    prefix = "╭─┤ "
+    fixed_len = len(prefix) + len(number) + 1 + len(active_suffix) + 1 + 1
+    available = max(0, card_width - fixed_len)
+    name = name[:available]
+    text.append(prefix, style=MUTED)
+    text.append(number, style=ACCENT)
+    text.append(" ", style=MUTED)
+    text.append(name, style=FOREGROUND)
+    if acc.is_active:
+        text.append(" ", style=MUTED)
+        text.append("●", style=ACCENT)
+    text.append("├", style=MUTED)
+    fill_len = max(0, card_width - len(text.plain) - 1)
+    text.append("─" * fill_len, style=MUTED)
+    text.append("╮", style=MUTED)
+    return text
+
+
+def meter_card(
+    acc: AccountSnapshot,
+    card_width: int,
+    bar_height: int,
+    *,
+    now: float,
+    threshold: float | None = None,
+) -> Text:
+    """A framed vertical-meter card: header, one bar column per window, and
+    baseline/label/percent/reset rows beneath. Always ``bar_height + 6``
+    lines of exactly ``card_width`` columns — used by the watch screen's
+    meter grid."""
+    interior_width = card_width - 2
+    bottom_border = "╰" + "─" * (card_width - 2) + "╯"
+    text = Text()
+    text.append(_meter_header(acc, card_width))
+
+    windows = [] if acc.usage.sentinel is not None else meter_windows(
+        acc.usage.last_good, now
+    )
+    if not windows:
+        n_blank = bar_height + 4
+        label = (
+            data.sentinel_label(acc.usage.sentinel)
+            if acc.usage.sentinel is not None
+            else "usage unavailable"
+        )
+        text_line = _fit_center(label, interior_width)
+        text_row = n_blank // 2
+        for i in range(n_blank):
+            text.append("\n")
+            text.append("│", style=MUTED)
+            if i == text_row:
+                text.append(text_line, style=MUTED)
+            else:
+                text.append(" " * interior_width)
+            text.append("│", style=MUTED)
+        text.append("\n")
+        text.append(bottom_border, style=MUTED)
+        return text
+
+    widths = _cell_widths(interior_width, len(windows))
+
+    for r in range(bar_height):
+        frac = (bar_height - 1 - r) / (bar_height - 1) if bar_height > 1 else 0.0
+        color = gradient_color(frac)
+        text.append("\n")
+        text.append("│", style=MUTED)
+        for w, (_label, pct, _reset, _maxed) in zip(widths, windows):
+            glyph = bar_v(pct, bar_height)[r]
+            bar_w = _meter_bar_width(w)
+            run = _fit_center(glyph * bar_w, w)
+            if glyph == " ":
+                text.append(run)
+            else:
+                text.append(run, style=color)
+        text.append("│", style=MUTED)
+
+    text.append("\n")
+    text.append("│", style=MUTED)
+    for w in widths:
+        bar_w = _meter_bar_width(w)
+        text.append(_fit_center("─" * bar_w, w), style=TRACK)
+    text.append("│", style=MUTED)
+
+    text.append("\n")
+    text.append("│", style=MUTED)
+    for w, (label, _pct, _reset, _maxed) in zip(widths, windows):
+        text.append(_fit_center(label, w), style=MUTED)
+    text.append("│", style=MUTED)
+
+    text.append("\n")
+    text.append("│", style=MUTED)
+    for w, (_label, pct, _reset, _maxed) in zip(widths, windows):
+        text.append(_fit_center(f"{round(pct)}%", w), style=severity_color(pct))
+    text.append("│", style=MUTED)
+
+    text.append("\n")
+    text.append("│", style=MUTED)
+    for w, (_label, _pct, reset, maxed) in zip(widths, windows):
+        text.append(_fit_center(reset or "", w), style=SEV_CRIT if maxed else MUTED)
+    text.append("│", style=MUTED)
+
+    text.append("\n")
+    text.append(bottom_border, style=MUTED)
+    return text
+
+
 def account_card_text(
     acc: AccountSnapshot,
     width: int,

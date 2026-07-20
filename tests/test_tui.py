@@ -1416,3 +1416,36 @@ def test_meter_grid_dims_fluid():
     ncols, cw, bh = meter_grid_dims(30, 12, 3)
     assert ncols == 1
     assert bh >= 3
+
+
+def test_meter_card_structure():
+    from claude_swap.tui.widgets import meter_card
+    from claude_swap.tui.theme import SEV_OK
+
+    acc = make_account(
+        1,
+        active=True,
+        email="work@acme.dev",
+        entry=make_entry(pct5=78.0, pct7=34.0, scoped=[("Fable", 100.0)]),
+    )
+    now = time.time()
+    card = meter_card(acc, 21, 5, now=now)
+    lines = card.plain.split("\n")
+    assert len(lines) == 5 + 6
+    assert all(len(ln) == 21 for ln in lines)
+    assert lines[0].startswith("╭") and lines[0].endswith("╮")
+    assert lines[-1].startswith("╰") and lines[-1].endswith("╯")
+    assert "5h" in card.plain and "7d" in card.plain
+    assert "78%" in card.plain
+    # bottom cell of a filled bar is the green (SEV_OK) end of the gradient
+    assert any(SEV_OK in str(span.style) for span in card.spans)
+
+
+def test_meter_card_handles_no_windows():
+    from claude_swap.tui.widgets import meter_card
+
+    acc = make_account(1, active=True, entry=make_entry(pct5=None, pct7=None))
+    card = meter_card(acc, 21, 5, now=time.time())
+    lines = card.plain.split("\n")
+    assert len(lines) == 5 + 6
+    assert all(len(ln) == 21 for ln in lines)
