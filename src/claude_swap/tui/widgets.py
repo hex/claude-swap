@@ -43,9 +43,9 @@ _BAR_TICK = "┃"
 _FLASH_S = 1.5  # how long a just-refreshed card's border stays highlighted
 
 # meter_card's non-bar rows: top+bottom borders (2), baseline (1),
-# big-digit percent (5), reset (1). Window labels are drawn vertically
-# inside the bars, so there is no separate label row.
-CARD_CHROME = 9
+# big-digit percent (5), small-pixel reset (3). Window labels are drawn
+# vertically inside the bars, so there is no separate label row.
+CARD_CHROME = 11
 
 
 def bar_cells(
@@ -331,7 +331,95 @@ def big_number(s: str) -> list[str]:
     return rows
 
 
-def _meter_header(acc: AccountSnapshot, card_width: int) -> Text:
+_PIXEL_LETTERS = {
+    "A": ("███", "█ █", "███", "█ █", "█ █"),
+    "B": ("██ ", "█ █", "██ ", "█ █", "██ "),
+    "C": ("███", "█  ", "█  ", "█  ", "███"),
+    "D": ("██ ", "█ █", "█ █", "█ █", "██ "),
+    "E": ("███", "█  ", "██ ", "█  ", "███"),
+    "F": ("███", "█  ", "██ ", "█  ", "█  "),
+    "G": ("███", "█  ", "█▄█", "█ █", "███"),
+    "H": ("█ █", "█ █", "███", "█ █", "█ █"),
+    "I": ("███", " █ ", " █ ", " █ ", "███"),
+    "J": ("  █", "  █", "  █", "█ █", "███"),
+    "K": ("█ █", "█ █", "██ ", "█ █", "█ █"),
+    "L": ("█  ", "█  ", "█  ", "█  ", "███"),
+    "M": ("█ █", "███", "███", "█ █", "█ █"),
+    "N": ("█ █", "██ ", "█▄█", "█ █", "█ █"),
+    "O": ("███", "█ █", "█ █", "█ █", "███"),
+    "P": ("███", "█ █", "███", "█  ", "█  "),
+    "Q": ("███", "█ █", "█ █", "███", "  █"),
+    "R": ("██ ", "█ █", "██ ", "█ █", "█ █"),
+    "S": ("███", "█  ", "███", "  █", "███"),
+    "T": ("███", " █ ", " █ ", " █ ", " █ "),
+    "U": ("█ █", "█ █", "█ █", "█ █", "███"),
+    "V": ("█ █", "█ █", "█ █", " █ ", " █ "),
+    "W": ("█ █", "█ █", "███", "███", "█ █"),
+    "X": ("█ █", "█ █", " █ ", "█ █", "█ █"),
+    "Y": ("█ █", "█ █", " █ ", " █ ", " █ "),
+    "Z": ("███", "  █", " █ ", "█  ", "███"),
+}
+
+
+def _glyph(ch: str) -> tuple[str, ...]:
+    """The 3x5 block glyph for a character: uppercase letters and digits map
+    to their pixel fonts, anything else to a blank 3x5 cell."""
+    u = ch.upper()
+    if u in _PIXEL_LETTERS:
+        return _PIXEL_LETTERS[u]
+    if ch in _PIXEL_DIGITS:
+        return _PIXEL_DIGITS[ch]
+    return ("   ",) * 5
+
+
+def _rotate_cw(glyph: tuple[str, ...]) -> list[str]:
+    """Rotate a 3-wide x 5-tall glyph 90° clockwise into 5-wide x 3-tall."""
+    return ["".join(glyph[4 - c][r] for c in range(5)) for r in range(3)]
+
+
+def label_rotated(text: str) -> list[str]:
+    """Render ``text`` as block letters turned 90° clockwise so the word reads
+    top-to-bottom down a bar. Each character becomes a 3-row x 5-col block and
+    the blocks are stacked vertically, so the result is ``3 * len(text)`` rows,
+    each 5 columns wide."""
+    rows: list[str] = []
+    for ch in text:
+        rows.extend(_rotate_cw(_glyph(ch)))
+    return rows
+
+
+_SMALL_GLYPHS = {
+    "0": ("█▀█", "█ █", "█▄█"),
+    "1": (" █ ", " █ ", " █ "),
+    "2": ("▀▀█", "█▀▀", "█▄▄"),
+    "3": ("▀▀█", " ▀█", "▄▄█"),
+    "4": ("█ █", "▀▀█", "  █"),
+    "5": ("█▀▀", "▀▀█", "▄▄█"),
+    "6": ("█▀▀", "█▀█", "█▄█"),
+    "7": ("▀▀█", "  █", "  █"),
+    "8": ("█▀█", "█▀█", "█▄█"),
+    "9": ("█▀█", "▀▀█", "▄▄█"),
+    "d": ("  █", "█▀█", "█▄█"),
+    "h": ("█  ", "█▀█", "█ █"),
+    "m": ("   ", "█▀█", "█ █"),
+    "w": ("   ", "█ █", "▀▄▀"),
+    "s": ("▄▀▀", "▀▀▄", "▄▄▀"),
+}
+
+
+def small_text(s: str) -> list[str]:
+    """Render ``s`` in a 3-row half-block pixel font (digits and the reset
+    units d/h/m/w/s). Unknown characters render as a blank 3-wide cell. Returns
+    3 rows of equal width (``3 * len(s)``)."""
+    rows = ["", "", ""]
+    for ch in s:
+        g = _SMALL_GLYPHS.get(ch, ("   ",) * 3)
+        for i in range(3):
+            rows[i] += g[i]
+    return rows
+
+
+def _meter_header(acc: AccountSnapshot, card_width: int, frame: str = MUTED) -> Text:
     """``╭─┤ {number} {name} {● if active}├────╮``.
 
     Degrades under a tight ``card_width``: the name is hard-truncated first,
@@ -348,7 +436,7 @@ def _meter_header(acc: AccountSnapshot, card_width: int) -> Text:
     # no fill. If even this doesn't fit, there's no room for a framed title.
     base_len = len(prefix) + len(number) + 1 + 1
     if base_len > card_width:
-        return Text("╭" + "─" * max(0, card_width - 2) + "╮", style=MUTED)
+        return Text("╭" + "─" * max(0, card_width - 2) + "╮", style=frame)
 
     available = card_width - base_len
     active_part = active_suffix if len(active_suffix) <= available else ""
@@ -356,24 +444,24 @@ def _meter_header(acc: AccountSnapshot, card_width: int) -> Text:
     name = name[:name_budget]
 
     text = Text()
-    text.append(prefix, style=MUTED)
+    text.append(prefix, style=frame)
     text.append(number, style=ACCENT)
     if name:
-        text.append(" ", style=MUTED)
+        text.append(" ", style=frame)
         text.append(name, style=FOREGROUND)
     if active_part:
-        text.append(" ", style=MUTED)
+        text.append(" ", style=frame)
         text.append("●", style=ACCENT)
-    text.append("├", style=MUTED)
+    text.append("├", style=frame)
     fill_len = max(0, card_width - len(text.plain) - 1)
-    text.append("─" * fill_len, style=MUTED)
-    text.append("╮", style=MUTED)
+    text.append("─" * fill_len, style=frame)
+    text.append("╮", style=frame)
 
     # Final safety net: guarantee exact width regardless of the arithmetic
     # above, since callers rely on every meter_card line being card_width.
     plain_len = len(text.plain)
     if plain_len < card_width:
-        text.append("─" * (card_width - plain_len), style=MUTED)
+        text.append("─" * (card_width - plain_len), style=frame)
     elif plain_len > card_width:
         text = text[:card_width]
     return text
@@ -415,10 +503,12 @@ def meter_card(
     columns — used by the watch screen's meter grid. ``flash`` highlights
     the top border to signal a just-refreshed measurement."""
     interior_width = card_width - 2
+    # An active account's card wears a green frame; the rest are muted.
+    frame = SEV_OK if acc.is_active else MUTED
     bottom_border = "╰" + "─" * (card_width - 2) + "╯"
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
     text = Text()
-    header = _meter_header(acc, card_width)
+    header = _meter_header(acc, card_width, frame)
     if flash:
         header = Text(header.plain, style=f"bold {ACCENT}")
     text.append(header)
@@ -441,64 +531,67 @@ def meter_card(
         start_row = (n_blank - len(wrapped)) // 2
         for i in range(n_blank):
             text.append("\n")
-            text.append("│", style=MUTED)
+            text.append("│", style=frame)
             idx = i - start_row
             if 0 <= idx < len(wrapped):
                 text.append(_fit_center(wrapped[idx], interior_width), style=MUTED)
             else:
                 text.append(" " * interior_width)
-            text.append("│", style=MUTED)
+            text.append("│", style=frame)
         text.append("\n")
-        text.append(bottom_border, style=MUTED)
+        text.append(bottom_border, style=frame)
         return _to_exact_width(text, card_width)
 
     widths = _cell_widths(interior_width, len(windows))
     # Each window's full bar column, its bar glyph width, its pct (for the
-    # per-window colour ramp), and its vertical-label placement — the label
-    # truncated to the bar height and its top row within the bar — computed
-    # once. ``lstart`` centers the label vertically; ``cc`` is its centre
-    # column within the ``bar_w``-wide run.
+    # per-window colour ramp), and its rotated-pixel label placement — the
+    # word runs down the bar as 90°-turned block letters, truncated to the bar
+    # height and centred vertically. ``lstart`` is the label's top row; a bar
+    # narrower than the 5-column pixel band gets no label.
     bars = []
     for w, (label, pct, _reset, _maxed) in zip(widths, windows):
         bar_w = _meter_bar_width(w)
-        text_label = label[:bar_height]
-        lstart = (bar_height - len(text_label)) // 2
-        bars.append((bar_v(pct, bar_height), bar_w, pct, text_label, lstart, w))
+        label_rows = label_rotated(label)[:bar_height] if bar_w >= 5 else []
+        lstart = (bar_height - len(label_rows)) // 2
+        bars.append((bar_v(pct, bar_height), bar_w, pct, label_rows, lstart, w))
 
     for r in range(bar_height):
         frac = (bar_height - 1 - r) / (bar_height - 1) if bar_height > 1 else 0.0
         text.append("\n")
-        text.append("│", style=MUTED)
-        for glyphs, bar_w, pct, label, lstart, w in bars:
+        text.append("│", style=frame)
+        for glyphs, bar_w, pct, label_rows, lstart, w in bars:
             glyph = glyphs[r]
             fill_style = None
             if glyph != " ":
                 color = _bar_color(pct, frac)
                 fill_style = f"{color} dim" if stale else color
-            in_label = lstart <= r < lstart + len(label)
+            in_label = lstart <= r < lstart + len(label_rows)
             # Left/right pads centre the ``bar_w`` run within the cell, exactly
             # as ``_fit_center`` would (extra column on the right).
             left_pad = (w - bar_w) // 2
             right_pad = w - bar_w - left_pad
             text.append(" " * left_pad)
             if in_label:
+                # The pixel label band sits in the centre 5 columns; carve it
+                # near-black on a filled glyph, light on the empty track, so it
+                # reads either way.
                 cc = bar_w // 2
-                # Carve the label char: near-black on a filled glyph, light on
-                # the empty track, so it reads either way.
+                band = label_rows[r - lstart]  # exactly 5 chars
+                lead = cc - 2
                 char_style = "#0d1117 bold" if glyph != " " else f"{FOREGROUND} bold"
-                text.append(glyph * cc, style=fill_style)
-                text.append(label[r - lstart], style=char_style)
-                text.append(glyph * (bar_w - cc - 1), style=fill_style)
+                text.append(glyph * lead, style=fill_style)
+                text.append(band, style=char_style)
+                text.append(glyph * (bar_w - lead - 5), style=fill_style)
             else:
                 text.append(glyph * bar_w, style=fill_style)
             text.append(" " * right_pad)
-        text.append("│", style=MUTED)
+        text.append("│", style=frame)
 
     text.append("\n")
-    text.append("│", style=MUTED)
+    text.append("│", style=frame)
     for glyphs, bar_w, _pct, _label, _lstart, w in bars:
         text.append(_fit_center("─" * bar_w, w), style=TRACK)
-    text.append("│", style=MUTED)
+    text.append("│", style=frame)
 
     # Percent as large 5-row block digits, glanceable at a distance. A window
     # whose cell can't hold the big digits falls back to a small "NN%" token
@@ -516,19 +609,33 @@ def meter_card(
 
     for r in range(5):
         text.append("\n")
-        text.append("│", style=MUTED)
+        text.append("│", style=frame)
         for cell_rows, pct_style in percent_cells:
             text.append(cell_rows[r], style=pct_style)
-        text.append("│", style=MUTED)
+        text.append("│", style=frame)
 
-    text.append("\n")
-    text.append("│", style=MUTED)
+    # Reset countdown as a small 3-row half-block pixel font; a cell too narrow
+    # for the pixels falls back to the plain reset token on the middle row.
+    reset_cells = []
     for w, (_label, _pct, reset, maxed) in zip(widths, windows):
-        text.append(_fit_center(reset or "", w), style=SEV_CRIT if maxed else MUTED)
-    text.append("│", style=MUTED)
+        reset_style = SEV_CRIT if maxed else MUTED
+        srows = small_text(reset or "")
+        if len(srows[0]) <= w:
+            cell_rows = [_fit_center(row, w) for row in srows]
+        else:
+            blank = " " * w
+            cell_rows = [blank, _fit_center(reset or "", w), blank]
+        reset_cells.append((cell_rows, reset_style))
+
+    for r in range(3):
+        text.append("\n")
+        text.append("│", style=frame)
+        for cell_rows, reset_style in reset_cells:
+            text.append(cell_rows[r], style=reset_style)
+        text.append("│", style=frame)
 
     text.append("\n")
-    text.append(bottom_border, style=MUTED)
+    text.append(bottom_border, style=frame)
     return _to_exact_width(text, card_width)
 
 
