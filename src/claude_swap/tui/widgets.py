@@ -42,9 +42,10 @@ _BAR_TICK = "┃"
 
 _FLASH_S = 1.5  # how long a just-refreshed card's border stays highlighted
 
-# meter_card's non-bar rows: top+bottom borders (2), baseline (1),
-# window labels (1), big-digit percent (5), small-pixel reset (3).
-CARD_CHROME = 12
+# meter_card's non-bar rows: top+bottom borders (2), baseline (1), window
+# labels (1), a blank margin row (1), big-digit percent (5), a blank margin
+# row (1), small-pixel reset (3).
+CARD_CHROME = 14
 
 
 def bar_cells(
@@ -532,6 +533,12 @@ def meter_card(
         text.append(_fit_label(label, w), style=f"bold {FOREGROUND}")
     text.append("│", style=frame)
 
+    # Blank margin row above the percent block.
+    text.append("\n")
+    text.append("│", style=frame)
+    text.append(" " * interior_width)
+    text.append("│", style=frame)
+
     # Percent as large 5-row block digits, glanceable at a distance. A window
     # whose cell can't hold the big digits falls back to a small "NN%" token
     # on the middle row, keeping every card exactly 5 percent rows tall.
@@ -552,6 +559,12 @@ def meter_card(
         for cell_rows, pct_style in percent_cells:
             text.append(cell_rows[r], style=pct_style)
         text.append("│", style=frame)
+
+    # Blank margin row below the percent block.
+    text.append("\n")
+    text.append("│", style=frame)
+    text.append(" " * interior_width)
+    text.append("│", style=frame)
 
     # Reset countdown as a small 3-row half-block pixel font; a cell too narrow
     # for the pixels falls back to the plain reset token on the middle row.
