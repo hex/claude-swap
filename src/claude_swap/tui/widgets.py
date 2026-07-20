@@ -368,15 +368,19 @@ def meter_card(
         return text
 
     widths = _cell_widths(interior_width, len(windows))
+    # Each window's full bar column + its bar glyph width, computed once.
+    bars = [
+        (bar_v(pct, bar_height), _meter_bar_width(w))
+        for w, (_label, pct, _reset, _maxed) in zip(widths, windows)
+    ]
 
     for r in range(bar_height):
         frac = (bar_height - 1 - r) / (bar_height - 1) if bar_height > 1 else 0.0
         color = gradient_color(frac)
         text.append("\n")
         text.append("│", style=MUTED)
-        for w, (_label, pct, _reset, _maxed) in zip(widths, windows):
-            glyph = bar_v(pct, bar_height)[r]
-            bar_w = _meter_bar_width(w)
+        for w, (glyphs, bar_w) in zip(widths, bars):
+            glyph = glyphs[r]
             run = _fit_center(glyph * bar_w, w)
             if glyph == " ":
                 text.append(run)
@@ -386,8 +390,7 @@ def meter_card(
 
     text.append("\n")
     text.append("│", style=MUTED)
-    for w in widths:
-        bar_w = _meter_bar_width(w)
+    for w, (_glyphs, bar_w) in zip(widths, bars):
         text.append(_fit_center("─" * bar_w, w), style=TRACK)
     text.append("│", style=MUTED)
 
