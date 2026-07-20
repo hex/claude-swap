@@ -8,6 +8,7 @@ auto-switch trigger line), and stale-measurement dimming.
 
 from __future__ import annotations
 
+import textwrap
 import time
 from functools import partial
 from typing import TYPE_CHECKING
@@ -244,15 +245,26 @@ def meter_grid_dims(
     n_accounts: int,
     *,
     min_card_w: int = 20,
-    bar_min: int = 3,
+    bar_min: int = 1,
+    bar_max: int = 20,
     card_chrome: int = 6,
+    gutter: int = 1,
 ) -> tuple[int, int, int]:
-    """(ncols, card_width, bar_height) for the meter grid at this terminal size."""
+    """(ncols, card_width, bar_height) for the meter grid at this terminal size.
+
+    Columns account for the inter-card gutter so a card never falls below
+    ``min_card_w`` by ignoring it. Bars shrink to fit the available height
+    (down to ``bar_min``) rather than overflow — the grid is not scrollable —
+    and never grow past ``bar_max``.
+    """
     n = max(1, n_accounts)
-    ncols = max(1, min((width + 1) // min_card_w, n))
-    card_width = (width - (ncols - 1)) // ncols
+    ncols = max(1, min((width + 1) // (min_card_w + gutter), n))
+    card_width = (width - gutter * (ncols - 1)) // ncols
     rows_of_cards = -(-n // ncols)  # ceil
-    bar_height = max(bar_min, height // rows_of_cards - card_chrome)
+    seps = rows_of_cards - 1
+    avail = height - rows_of_cards * card_chrome - seps
+    bar_height = max(bar_min, avail // rows_of_cards)
+    bar_height = min(bar_height, bar_max)
     return ncols, card_width, bar_height
 
 
@@ -321,6 +333,27 @@ def _meter_header(acc: AccountSnapshot, card_width: int) -> Text:
     return text
 
 
+def _to_exact_width(card: Text, card_width: int) -> Text:
+    """Force every line of ``card`` to exactly ``card_width`` columns, keeping
+    per-character styles — truncating overlong lines and padding short ones.
+    Callers rely on this invariant; at tiny widths (1–2 cols) the framed
+    layout can't hold it on its own, so this is the final guarantee."""
+    lines = card.plain.split("\n")
+    if all(len(line) == card_width for line in lines):
+        return card
+    out = Text()
+    offset = 0
+    for i, line in enumerate(lines):
+        if i:
+            out.append("\n")
+        take = min(len(line), card_width)
+        out.append(card[offset : offset + take])
+        if take < card_width:
+            out.append(" " * (card_width - take))
+        offset += len(line) + 1
+    return out
+
+
 def meter_card(
     acc: AccountSnapshot,
     card_width: int,
@@ -336,6 +369,7 @@ def meter_card(
     measurement."""
     interior_width = card_width - 2
     bottom_border = "╰" + "─" * (card_width - 2) + "╯"
+    stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
     text = Text()
     header = _meter_header(acc, card_width)
     if flash:
@@ -353,19 +387,23 @@ def meter_card(
             if acc.usage.sentinel is not None
             else "usage unavailable"
         )
-        text_line = _fit_center(label, interior_width)
-        text_row = n_blank // 2
+        # Wrap the message across the interior rows rather than truncate it to
+        # one line — nothing should be clipped when it can fit. Centered
+        # vertically within the available rows.
+        wrapped = textwrap.wrap(label, width=max(1, interior_width))[:n_blank] or [""]
+        start_row = (n_blank - len(wrapped)) // 2
         for i in range(n_blank):
             text.append("\n")
             text.append("│", style=MUTED)
-            if i == text_row:
-                text.append(text_line, style=MUTED)
+            idx = i - start_row
+            if 0 <= idx < len(wrapped):
+                text.append(_fit_center(wrapped[idx], interior_width), style=MUTED)
             else:
                 text.append(" " * interior_width)
             text.append("│", style=MUTED)
         text.append("\n")
         text.append(bottom_border, style=MUTED)
-        return text
+        return _to_exact_width(text, card_width)
 
     widths = _cell_widths(interior_width, len(windows))
     # Each window's full bar column + its bar glyph width, computed once.
@@ -376,7 +414,7 @@ def meter_card(
 
     for r in range(bar_height):
         frac = (bar_height - 1 - r) / (bar_height - 1) if bar_height > 1 else 0.0
-        color = gradient_color(frac)
+        color = f"{gradient_color(frac)} dim" if stale else gradient_color(frac)
         text.append("\n")
         text.append("│", style=MUTED)
         for w, (glyphs, bar_w) in zip(widths, bars):
@@ -403,7 +441,8 @@ def meter_card(
     text.append("\n")
     text.append("│", style=MUTED)
     for w, (_label, pct, _reset, _maxed) in zip(widths, windows):
-        text.append(_fit_center(f"{round(pct)}%", w), style=severity_color(pct))
+        pct_style = f"{severity_color(pct)} dim" if stale else severity_color(pct)
+        text.append(_fit_center(f"{round(pct)}%", w), style=pct_style)
     text.append("│", style=MUTED)
 
     text.append("\n")
@@ -414,7 +453,7 @@ def meter_card(
 
     text.append("\n")
     text.append(bottom_border, style=MUTED)
-    return text
+    return _to_exact_width(text, card_width)
 
 
 def grid_move(cursor: int, dx: int, dy: int, ncols: int, n: int) -> int:
@@ -700,6 +739,7 @@ class MetersGrid(Static):
         self.cursor: int | None = None
         self._stamps: dict[str, float | None] = {}
         self._flash: set[str] = set()
+        self._flash_gen: dict[str, int] = {}
 
     def on_mount(self) -> None:
         self.watch(self.app, "snapshot", self._on_snapshot)
@@ -710,21 +750,29 @@ class MetersGrid(Static):
         self.refresh(layout=True)
 
     def _flash_updated(self, snap: AccountsSnapshot) -> None:
-        """Briefly highlight cards whose stored measurement just advanced."""
+        """Briefly highlight cards whose stored measurement just advanced.
+
+        A card already flashing that changes again extends its flash: each
+        change bumps the card's generation and schedules a clear tagged with
+        that generation, so an earlier timer can't cut a re-flash short."""
         new_stamps = {acc.number: acc.usage.fetched_at for acc in snap.accounts}
         if self._stamps:
             changed = {
                 num
                 for num, ts in new_stamps.items()
                 if ts is not None and ts != self._stamps.get(num)
-            } - self._flash
-            if changed:
-                self._flash |= changed
-                self.set_timer(_FLASH_S, partial(self._clear_flash, changed))
+            }
+            for num in changed:
+                gen = self._flash_gen.get(num, 0) + 1
+                self._flash_gen[num] = gen
+                self._flash.add(num)
+                self.set_timer(_FLASH_S, partial(self._clear_flash, num, gen))
         self._stamps = new_stamps
 
-    def _clear_flash(self, numbers: set[str]) -> None:
-        self._flash -= numbers
+    def _clear_flash(self, number: str, generation: int) -> None:
+        if self._flash_gen.get(number) != generation:
+            return  # a newer re-flash owns this card now; leave it lit
+        self._flash.discard(number)
         self.refresh(layout=True)
 
     def render(self) -> Text:

@@ -1435,10 +1435,27 @@ def test_meter_grid_dims_fluid():
     ncols, cw, bh = meter_grid_dims(96, 34, 3)
     assert ncols == 3
     assert cw == 31
-    # narrow: single column, bar floor respected
+    # narrow: single column; bars shrink to fit (floor is 1, not 3)
     ncols, cw, bh = meter_grid_dims(30, 12, 3)
     assert ncols == 1
-    assert bh >= 3
+    assert bh >= 1
+
+
+def test_meter_grid_dims_fits_height():
+    from claude_swap.tui.widgets import meter_grid_dims
+
+    for w, h, n in ((44, 16, 3), (96, 34, 3), (21, 16, 1)):
+        ncols, _cw, bh = meter_grid_dims(w, h, n)
+        rows = -(-n // ncols)  # ceil
+        assert rows * (bh + 6) + (rows - 1) <= h, (w, h, n, ncols, bh)
+
+
+def test_meter_grid_dims_honors_gutter_min_card_width():
+    from claude_swap.tui.widgets import meter_grid_dims
+
+    # 40 wide, 3 accounts: gutters must not push cards below min_card_w (20)
+    ncols, cw, _bh = meter_grid_dims(40, 16, 3)
+    assert cw >= 20
 
 
 def test_meter_card_structure():
@@ -1472,6 +1489,23 @@ def test_meter_card_handles_no_windows():
     lines = card.plain.split("\n")
     assert len(lines) == 5 + 6
     assert all(len(ln) == 21 for ln in lines)
+    # the placeholder message is actually rendered, not just blank rows
+    assert "usage unavailable" in card.plain
+
+
+def test_meter_card_sentinel_message_wraps_full():
+    from claude_swap.tui.widgets import meter_card
+
+    acc = make_account(1, active=True, entry=UsageEntry(sentinel=USAGE_TOKEN_EXPIRED))
+    now = time.time()
+    card = meter_card(acc, 21, 5, now=now)
+    lines = card.plain.split("\n")
+    assert len(lines) == 5 + 6
+    assert all(len(ln) == 21 for ln in lines)
+    # the full sentinel label wraps across rows rather than truncating to one
+    # line — its last word must survive.
+    label = tui_data.sentinel_label(USAGE_TOKEN_EXPIRED)
+    assert label.split()[-1] in card.plain
 
 
 def test_meter_card_exact_width_at_narrow_widths():
@@ -1484,8 +1518,8 @@ def test_meter_card_exact_width_at_narrow_widths():
         entry=make_entry(pct5=78.0, pct7=34.0, scoped=[("Fable", 100.0)]),
     )
     now = time.time()
-    for w in (6, 8, 12, 21):
-        card = meter_card(acc, w, 5, now=now)
+    for w in (1, 2, 3, 6, 8, 12, 21):
+        card = meter_card(acc, w, 3, now=now)
         assert all(len(ln) == w for ln in card.plain.split("\n")), (
             w,
             card.plain.split("\n"),
@@ -1526,6 +1560,30 @@ def test_meter_card_header_and_row_styling():
 
     # MAXED window's reset (Fable, exactly 2 days out -> "2d") is SEV_CRIT
     assert any("2d" in t for t in texts_with_style(SEV_CRIT))
+
+
+def test_meter_card_stale_dims_bars_and_percent():
+    from claude_swap.tui.widgets import meter_card
+    from claude_swap.usage_store import STALE_OK_S
+
+    now = time.time()
+    stale = make_account(
+        1,
+        active=True,
+        email="work@acme.dev",
+        entry=make_entry(pct5=78.0, pct7=34.0, age_s=STALE_OK_S + 60),
+    )
+    fresh = make_account(
+        2,
+        active=True,
+        email="work@acme.dev",
+        entry=make_entry(pct5=78.0, pct7=34.0, age_s=5.0),
+    )
+    stale_card = meter_card(stale, 21, 5, now=now)
+    fresh_card = meter_card(fresh, 21, 5, now=now)
+
+    assert any("dim" in str(sp.style) for sp in stale_card.spans)
+    assert not any("dim" in str(sp.style) for sp in fresh_card.spans)
 
 
 def test_meter_card_flash_highlights_top_border():
@@ -1612,6 +1670,7 @@ def test_meters_grid_text_two_columns():
     out = meters_grid_text(accounts, 44, 16, now=time.time())
     lines = out.plain.split("\n")
     assert lines[0].count("╭") == 2  # two cards side by side on row 1
+    assert len(lines) <= 16  # the whole grid fits the device height
 
 
 def test_meters_grid_text_rows_separated_by_blank_line():
@@ -1626,22 +1685,91 @@ def test_meters_grid_text_rows_separated_by_blank_line():
     assert lines[card_lines + 1].count("╭") == 1  # lone third card on row 2
 
 
-def test_meters_grid_text_cursor_marks_selected_card():
+def _accent_cols_by_line(text) -> dict[int, set[int]]:
+    """Per-line column offsets styled ACCENT, for pinpointing which card's
+    border the cursor marked."""
     from claude_swap.tui.theme import ACCENT
-    from claude_swap.tui.widgets import meters_grid_text
+
+    accent_offsets: set[int] = set()
+    for sp in text.spans:
+        if sp.style == ACCENT:
+            accent_offsets.update(range(sp.start, sp.end))
+    result: dict[int, set[int]] = {}
+    offset = 0
+    for i, line in enumerate(text.plain.split("\n")):
+        cols = {o - offset for o in accent_offsets if offset <= o < offset + len(line)}
+        if cols:
+            result[i] = cols
+        offset += len(line) + 1
+    return result
+
+
+def test_meters_grid_text_cursor_marks_selected_card():
+    from claude_swap.tui.widgets import meter_grid_dims, meters_grid_text
 
     accounts = _make_three_meter_accounts()
-    plain_out = meters_grid_text(accounts, 44, 16, now=time.time())
-    marked_out = meters_grid_text(accounts, 44, 16, cursor=0, now=time.time())
-    assert plain_out.plain == marked_out.plain  # marking never changes layout/text
-    accent_spans_plain = [sp for sp in plain_out.spans if sp.style == ACCENT]
-    accent_spans_marked = [sp for sp in marked_out.spans if sp.style == ACCENT]
-    assert len(accent_spans_marked) > len(accent_spans_plain)
+    ncols, cw, bh = meter_grid_dims(44, 16, len(accounts))
+    card_lines = bh + 6
+    now = time.time()
+
+    plain_out = meters_grid_text(accounts, 44, 16, now=now)
+    marked0 = meters_grid_text(accounts, 44, 16, cursor=0, now=now)
+    marked1 = meters_grid_text(accounts, 44, 16, cursor=1, now=now)
+    assert plain_out.plain == marked0.plain  # marking never changes layout/text
+
+    # card 0 spans cols [0, cw); card 1 sits after a 1-col gutter at [cw+1, ...)
+    card0_left, card0_right = 0, cw - 1
+    card1_left, card1_right = cw + 1, cw + 1 + cw - 1
+    cols0 = _accent_cols_by_line(marked0)
+    cols1 = _accent_cols_by_line(marked1)
+    for i in range(card_lines):  # both cards live on row 0's lines
+        # cursor=0 accents card 0's border edges, not card 1's left border
+        assert {card0_left, card0_right} <= cols0.get(i, set())
+        assert card1_left not in cols0.get(i, set())
+        # cursor=1 accents card 1's border edges, not card 0's left border
+        assert {card1_left, card1_right} <= cols1.get(i, set())
+        assert card0_left not in cols1.get(i, set())
 
 
 def test_meters_grid_text_empty_accounts():
     from claude_swap.tui.widgets import meters_grid_text
 
     out = meters_grid_text([], 44, 16, now=time.time())
-    assert isinstance(out.plain, str)
-    assert out.plain
+    assert out.plain == "no accounts"
+
+
+def _snap_with_fetched_at(fetched_at: float) -> AccountsSnapshot:
+    entry = dataclasses.replace(make_entry(pct5=50.0), fetched_at=fetched_at)
+    return AccountsSnapshot(
+        active_number="1",
+        accounts=(make_account(1, active=True, entry=entry),),
+        taken_at=time.time(),
+    )
+
+
+def test_meters_grid_flash_extends_on_reflash():
+    # A re-flash of an already-flashing account must not be cleared early by
+    # the earlier timer: the generation guard keeps the account flashed until
+    # the LATEST timer fires.
+    from claude_swap.tui.widgets import MetersGrid
+
+    grid = MetersGrid()
+    grid.set_timer = lambda *a, **k: None  # no live scheduling in a unit test
+    grid.refresh = lambda *a, **k: None
+
+    grid._flash_updated(_snap_with_fetched_at(1000.0))  # baseline, no flash
+    assert grid._flash == set()
+
+    grid._flash_updated(_snap_with_fetched_at(1001.0))  # first change -> gen 1
+    assert "1" in grid._flash
+
+    grid._flash_updated(_snap_with_fetched_at(1002.0))  # re-flash -> gen 2
+    assert "1" in grid._flash
+
+    # The FIRST timer fires with its stale generation: must NOT clear.
+    grid._clear_flash("1", 1)
+    assert "1" in grid._flash
+
+    # The LATEST timer fires with the current generation: clears.
+    grid._clear_flash("1", 2)
+    assert "1" not in grid._flash
