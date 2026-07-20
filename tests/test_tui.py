@@ -1568,7 +1568,7 @@ def test_meter_grid_dims_bars_fill_tall_terminal():
     # one account on a tall terminal: the bar consumes the spare rows
     # (no fixed height cap), leaving only the 12-line card chrome.
     _ncols, _cw, bh = meter_grid_dims(40, 40, 1)
-    assert bh == 40 - 14
+    assert bh == 40 - 12
 
 
 def test_meter_bar_width_fills_cell():
@@ -1597,14 +1597,6 @@ def test_big_number_pixel_5_rows():
         assert set(r) <= {"█", " "}
 
 
-def test_small_text_three_rows():
-    from claude_swap.tui.widgets import small_text
-
-    rows = small_text("1d")
-    assert len(rows) == 3
-    assert len({len(r) for r in rows}) == 1  # all rows equal width
-
-
 def test_meter_card_has_plain_label_row():
     from claude_swap.tui.widgets import meter_card
 
@@ -1618,8 +1610,8 @@ def test_meter_card_has_plain_label_row():
     bar_height = 10
     card = meter_card(acc, 34, bar_height, now=now)
     lines = card.plain.split("\n")
-    # header + bar rows + baseline + label + 5 percent + 3 reset + bottom
-    assert len(lines) == bar_height + 14
+    # header + bar rows + baseline + label + 5 percent + reset + bottom
+    assert len(lines) == bar_height + 12
     assert all(len(ln) == 34 for ln in lines)
 
     label_row = lines[bar_height + 2]  # header(1) + bars(bar_height) + baseline(1)
@@ -1647,7 +1639,7 @@ def test_meter_card_has_plain_label_row():
     assert "AnthropicMaxPlan" not in narrow_card.plain
 
 
-def test_meter_card_line_count_chrome_14():
+def test_meter_card_line_count_chrome_12():
     from claude_swap.tui.widgets import meter_card
 
     acc = make_account(
@@ -1658,10 +1650,55 @@ def test_meter_card_line_count_chrome_14():
     )
     card = meter_card(acc, 40, 12, now=time.time())
     lines = card.plain.split("\n")
-    # bar_height (12) + chrome (14): 2 borders + baseline + label + blank +
-    # 5 percent + blank + 3 reset
-    assert len(lines) == 12 + 14
+    # bar_height (12) + chrome (12): 2 borders + baseline + label + blank +
+    # 5 percent + blank + reset
+    assert len(lines) == 12 + 12
     assert all(len(ln) == 40 for ln in lines)
+
+
+def test_meter_card_reset_is_plain_single_row():
+    from claude_swap.tui.widgets import meter_card
+    from claude_swap.usage_store import UsageEntry
+
+    now = 1_000_000.0
+
+    def _iso(offset: float) -> str:
+        return datetime.fromtimestamp(now + offset, tz=timezone.utc).isoformat()
+
+    last_good = {
+        "five_hour": {"pct": 78.0, "resets_at": _iso(3 * 3600)},
+        "seven_day": {"pct": 34.0, "resets_at": _iso(3 * 86400)},
+    }
+    entry = UsageEntry(last_good=last_good, fetched_at=now - 5.0, age_s=5.0)
+    acc = make_account(1, active=True, email="work@acme.dev", entry=entry)
+    bar_height = 10
+    card = meter_card(acc, 34, bar_height, now=now)
+    lines = card.plain.split("\n")
+    assert len(lines) == bar_height + 12
+    assert all(len(ln) == 34 for ln in lines)
+
+    def is_blank_interior(line: str) -> bool:
+        return line[0] == "│" and line[-1] == "│" and line[1:-1].strip() == ""
+
+    # header(1) + bars(bar_height) + baseline(1) + label(1) -> percent block
+    # starts right after a blank margin row; below it, another blank margin
+    # row precedes a SINGLE plain reset row, then the bottom border.
+    label_row = bar_height + 2
+    percent_start = label_row + 2
+    assert is_blank_interior(lines[percent_start - 1])
+    percent_end = percent_start + 5
+    assert is_blank_interior(lines[percent_end])  # blank margin below percent
+
+    reset_row = lines[percent_end + 1]
+    assert "3d" in reset_row  # seven_day resets in 3 days
+    assert not is_blank_interior(reset_row)
+    # the reset row is a single row: the very next line is the bottom border
+    assert lines[percent_end + 2] == lines[-1]
+    assert lines[-1].startswith("╰") and lines[-1].endswith("╯")
+
+    # not a half-block pixel font: the reset row itself has no block glyphs
+    # (the bar rows above legitimately use them for the meter fill)
+    assert not (set(reset_row) & set("█▀▄"))
 
 
 def test_meter_card_percent_has_margin_rows():
@@ -1676,7 +1713,7 @@ def test_meter_card_percent_has_margin_rows():
     bar_height = 10
     card = meter_card(acc, 34, bar_height, now=time.time())
     lines = card.plain.split("\n")
-    assert len(lines) == bar_height + 14
+    assert len(lines) == bar_height + 12
     assert all(len(ln) == 34 for ln in lines)
 
     def is_blank_interior(line: str) -> bool:
@@ -1690,7 +1727,7 @@ def test_meter_card_percent_has_margin_rows():
     assert not is_blank_interior(lines[percent_start])  # first percent row has content
 
     # the percent block is exactly 5 rows, followed by a blank margin row
-    # before the 3-row reset block.
+    # before the reset row.
     percent_end = percent_start + 5
     assert not is_blank_interior(lines[percent_end - 1])  # last percent row has content
     assert is_blank_interior(lines[percent_end])
@@ -1736,7 +1773,7 @@ def test_meter_card_percent_is_five_big_rows():
     card = meter_card(acc, 30, 5, now=now)
     lines = card.plain.split("\n")
     # top border + 5 bar rows + baseline + 5 percent rows + reset + bottom
-    assert len(lines) == 5 + 14
+    assert len(lines) == 5 + 12
     assert all(len(ln) == 30 for ln in lines)
     # the single window's cell is wide enough for the pixel digits, so the
     # small "78%" token never appears — the percent is drawn as block glyphs
@@ -1758,7 +1795,7 @@ def test_meter_card_structure():
     now = time.time()
     card = meter_card(acc, 21, 5, now=now)
     lines = card.plain.split("\n")
-    assert len(lines) == 5 + 14
+    assert len(lines) == 5 + 12
     assert all(len(ln) == 21 for ln in lines)
     assert lines[0].startswith("╭") and lines[0].endswith("╮")
     assert lines[-1].startswith("╰") and lines[-1].endswith("╯")
@@ -1778,7 +1815,7 @@ def test_meter_card_handles_no_windows():
     acc = make_account(1, active=True, entry=make_entry(pct5=None, pct7=None))
     card = meter_card(acc, 21, 5, now=time.time())
     lines = card.plain.split("\n")
-    assert len(lines) == 5 + 14
+    assert len(lines) == 5 + 12
     assert all(len(ln) == 21 for ln in lines)
     # the placeholder message is actually rendered, not just blank rows
     assert "usage unavailable" in card.plain
@@ -1791,7 +1828,7 @@ def test_meter_card_sentinel_message_wraps_full():
     now = time.time()
     card = meter_card(acc, 21, 5, now=now)
     lines = card.plain.split("\n")
-    assert len(lines) == 5 + 14
+    assert len(lines) == 5 + 12
     assert all(len(ln) == 21 for ln in lines)
     # the full sentinel label wraps across rows rather than truncating to one
     # line — its last word must survive.
@@ -1853,10 +1890,9 @@ def test_meter_card_header_and_row_styling():
         )
     assert any("100%" in t for t in texts_with_style(severity_color(100.0)))
 
-    # MAXED window's reset (Fable, exactly 2 days out -> "2d") renders as small
-    # half-block pixels styled SEV_CRIT — not as literal "2d" text.
-    assert "2d" not in card.plain
-    assert any(set(t) & set("█▀▄") for t in texts_with_style(SEV_CRIT))
+    # MAXED window's reset (Fable, exactly 2 days out -> "2d") renders as
+    # plain text styled SEV_CRIT.
+    assert any("2d" in t for t in texts_with_style(SEV_CRIT))
 
 
 def test_meter_card_header_honors_alias():
@@ -1886,7 +1922,7 @@ def test_meter_card_header_honors_alias():
 
     for card in (aliased_card, unaliased_card):
         lines = card.plain.split("\n")
-        assert len(lines) == 5 + 14
+        assert len(lines) == 5 + 12
         assert all(len(ln) == 21 for ln in lines)
 
 
@@ -1928,7 +1964,7 @@ def test_meter_card_flash_highlights_top_border():
     # flash never changes layout or text, only the top border's style
     assert plain.plain == flashed.plain
     lines = flashed.plain.split("\n")
-    assert len(lines) == 5 + 14
+    assert len(lines) == 5 + 12
     assert all(len(ln) == 21 for ln in lines)
 
     header_end = len(lines[0])
@@ -2008,7 +2044,7 @@ def test_meters_grid_text_rows_separated_by_blank_line():
     out = meters_grid_text(accounts, 44, 31, now=time.time())
     lines = out.plain.split("\n")
     _ncols, _cw, bar_height = meter_grid_dims(44, 31, len(accounts))
-    card_lines = bar_height + 14
+    card_lines = bar_height + 12
     assert lines[card_lines] == ""  # blank separator between card rows
     assert lines[card_lines + 1].count("╭") == 1  # lone third card on row 2
 
@@ -2037,7 +2073,7 @@ def test_meters_grid_text_cursor_marks_selected_card():
 
     accounts = _make_three_meter_accounts()
     ncols, cw, bh = meter_grid_dims(44, 31, len(accounts))
-    card_lines = bh + 14
+    card_lines = bh + 12
     now = time.time()
 
     plain_out = meters_grid_text(accounts, 44, 31, now=now)

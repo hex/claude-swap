@@ -44,8 +44,8 @@ _FLASH_S = 1.5  # how long a just-refreshed card's border stays highlighted
 
 # meter_card's non-bar rows: top+bottom borders (2), baseline (1), window
 # labels (1), a blank margin row (1), big-digit percent (5), a blank margin
-# row (1), small-pixel reset (3).
-CARD_CHROME = 14
+# row (1), reset (1).
+CARD_CHROME = 12
 
 
 def bar_cells(
@@ -340,37 +340,6 @@ def big_number(s: str) -> list[str]:
     return rows
 
 
-_SMALL_GLYPHS = {
-    "0": ("█▀█", "█ █", "█▄█"),
-    "1": (" █ ", " █ ", " █ "),
-    "2": ("▀▀█", "█▀▀", "█▄▄"),
-    "3": ("▀▀█", " ▀█", "▄▄█"),
-    "4": ("█ █", "▀▀█", "  █"),
-    "5": ("█▀▀", "▀▀█", "▄▄█"),
-    "6": ("█▀▀", "█▀█", "█▄█"),
-    "7": ("▀▀█", "  █", "  █"),
-    "8": ("█▀█", "█▀█", "█▄█"),
-    "9": ("█▀█", "▀▀█", "▄▄█"),
-    "d": ("  █", "█▀█", "█▄█"),
-    "h": ("█  ", "█▀█", "█ █"),
-    "m": ("   ", "█▀█", "█ █"),
-    "w": ("   ", "█ █", "▀▄▀"),
-    "s": ("▄▀▀", "▀▀▄", "▄▄▀"),
-}
-
-
-def small_text(s: str) -> list[str]:
-    """Render ``s`` in a 3-row half-block pixel font (digits and the reset
-    units d/h/m/w/s). Unknown characters render as a blank 3-wide cell. Returns
-    3 rows of equal width (``3 * len(s)``)."""
-    rows = ["", "", ""]
-    for ch in s:
-        g = _SMALL_GLYPHS.get(ch, ("   ",) * 3)
-        for i in range(3):
-            rows[i] += g[i]
-    return rows
-
-
 def _meter_header(acc: AccountSnapshot, card_width: int, frame: str = MUTED) -> Text:
     """``╭─┤ {number} {name} {● if active}├────╮``.
 
@@ -566,25 +535,13 @@ def meter_card(
     text.append(" " * interior_width)
     text.append("│", style=frame)
 
-    # Reset countdown as a small 3-row half-block pixel font; a cell too narrow
-    # for the pixels falls back to the plain reset token on the middle row.
-    reset_cells = []
+    # Plain reset countdown row, one cell per window.
+    text.append("\n")
+    text.append("│", style=frame)
     for w, (_label, _pct, reset, maxed) in zip(widths, windows):
         reset_style = SEV_CRIT if maxed else MUTED
-        srows = small_text(reset or "")
-        if len(srows[0]) <= w:
-            cell_rows = [_fit_center(row, w) for row in srows]
-        else:
-            blank = " " * w
-            cell_rows = [blank, _fit_center(reset or "", w), blank]
-        reset_cells.append((cell_rows, reset_style))
-
-    for r in range(3):
-        text.append("\n")
-        text.append("│", style=frame)
-        for cell_rows, reset_style in reset_cells:
-            text.append(cell_rows[r], style=reset_style)
-        text.append("│", style=frame)
+        text.append(_fit_center(reset or "", w), style=reset_style)
+    text.append("│", style=frame)
 
     text.append("\n")
     text.append(bottom_border, style=frame)
