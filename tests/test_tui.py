@@ -22,7 +22,7 @@ from claude_swap.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui import data as tui_data
-from claude_swap.tui.widgets import gradient_color
+from claude_swap.tui.widgets import bar_v, gradient_color
 from claude_swap.usage_store import UsageEntry
 
 
@@ -1372,3 +1372,13 @@ def test_gradient_color_hits_stops_and_interpolates():
     assert gradient_color(0.25) == "#afaf73"  # (175,175,115)
     assert gradient_color(-1.0) == "#87af87"  # clamp low
     assert gradient_color(2.0) == "#d75f5f"   # clamp high
+
+
+def test_bar_v_fill_from_bottom():
+    from claude_swap.tui.widgets import bar_v
+    assert bar_v(100.0, 4) == ["█", "█", "█", "█"]
+    assert bar_v(0.0, 4)   == [" ", " ", " ", " "]
+    assert bar_v(50.0, 4)  == [" ", " ", "█", "█"]   # 2 full at bottom
+    assert bar_v(75.0, 4)  == [" ", "█", "█", "█"]
+    assert bar_v(62.5, 4)  == [" ", "▄", "█", "█"]   # partial top cell
+    assert bar_v(150.0, 2) == ["█", "█"]             # clamps to 100

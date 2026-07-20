@@ -96,6 +96,20 @@ def gradient_color(t: float) -> str:
     return SEV_CRIT
 
 
+_V_EIGHTHS = " ▁▂▃▄▅▆▇█"  # index 0..8, empty → full
+
+
+def bar_v(pct: float, height: int) -> list[str]:
+    """A vertical bar ``height`` cells tall, glyphs top-row-first, filled from
+    the bottom via eighth blocks."""
+    eighths = max(0.0, min(100.0, pct)) / 100.0 * height * 8
+    rows = []
+    for r in range(height - 1, -1, -1):  # r = whole cells below this one
+        cell = max(0, min(8, round(eighths - r * 8)))
+        rows.append(_V_EIGHTHS[cell])
+    return rows
+
+
 def usage_bar(
     label: str,
     pct: float | None,
