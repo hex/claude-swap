@@ -42,9 +42,10 @@ _BAR_TICK = "┃"
 
 _FLASH_S = 1.5  # how long a just-refreshed card's border stays highlighted
 
-# meter_card's non-bar rows: top+bottom borders (2), baseline (1), label (1),
-# big-digit percent (3), reset (1).
-CARD_CHROME = 8
+# meter_card's non-bar rows: top+bottom borders (2), baseline (1),
+# big-digit percent (5), reset (1). Window labels are drawn vertically
+# inside the bars, so there is no separate label row.
+CARD_CHROME = 9
 
 
 def bar_cells(
@@ -302,26 +303,30 @@ def _fit_center(s: str, width: int) -> str:
     return s[:width].center(width)
 
 
-_BIG_DIGITS = {
-    "0": (" _ ", "| |", "|_|"),
-    "1": ("   ", "  |", "  |"),
-    "2": (" _ ", " _|", "|_ "),
-    "3": (" _ ", " _|", " _|"),
-    "4": ("   ", "|_|", "  |"),
-    "5": (" _ ", "|_ ", " _|"),
-    "6": (" _ ", "|_ ", "|_|"),
-    "7": (" _ ", "  |", "  |"),
-    "8": (" _ ", "|_|", "|_|"),
-    "9": (" _ ", "|_|", " _|"),
+_PIXEL_DIGITS = {
+    "0": ("███", "█ █", "█ █", "█ █", "███"),
+    "1": (" █ ", "██ ", " █ ", " █ ", "███"),
+    "2": ("███", "  █", "███", "█  ", "███"),
+    "3": ("███", "  █", "███", "  █", "███"),
+    "4": ("█ █", "█ █", "███", "  █", "  █"),
+    "5": ("███", "█  ", "███", "  █", "███"),
+    "6": ("███", "█  ", "███", "█ █", "███"),
+    "7": ("███", "  █", "  █", "  █", "  █"),
+    "8": ("███", "█ █", "███", "█ █", "███"),
+    "9": ("███", "█ █", "███", "  █", "███"),
 }
 
 
 def big_number(s: str) -> list[str]:
-    """Render a digit string as 3 rows of large glyphs (each digit 3 cols)."""
-    rows = ["", "", ""]
-    for ch in s:
-        g = _BIG_DIGITS.get(ch, ("   ", "   ", "   "))
-        for i in range(3):
+    """Render a digit string as 5 rows of bold block glyphs. Each digit is 3
+    cols wide and digits are joined by a one-column gap, so ``"100"`` is
+    3+1+3+1+3 = 11 wide."""
+    rows = ["", "", "", "", ""]
+    for pos, ch in enumerate(s):
+        g = _PIXEL_DIGITS.get(ch, ("   ", "   ", "   ", "   ", "   "))
+        for i in range(5):
+            if pos:
+                rows[i] += " "
             rows[i] += g[i]
     return rows
 
@@ -404,10 +409,11 @@ def meter_card(
     flash: bool = False,
 ) -> Text:
     """A framed vertical-meter card: header, one bar column per window, and
-    baseline/label/percent/reset rows beneath. Always
-    ``bar_height + CARD_CHROME`` lines of exactly ``card_width`` columns —
-    used by the watch screen's meter grid. ``flash`` highlights the top
-    border to signal a just-refreshed measurement."""
+    baseline/percent/reset rows beneath. Each window's label is drawn
+    vertically down the middle of its bar rather than on a separate row.
+    Always ``bar_height + CARD_CHROME`` lines of exactly ``card_width``
+    columns — used by the watch screen's meter grid. ``flash`` highlights
+    the top border to signal a just-refreshed measurement."""
     interior_width = card_width - 2
     bottom_border = "╰" + "─" * (card_width - 2) + "╯"
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
@@ -447,54 +453,68 @@ def meter_card(
         return _to_exact_width(text, card_width)
 
     widths = _cell_widths(interior_width, len(windows))
-    # Each window's full bar column, its bar glyph width, and its pct (for the
-    # per-window colour ramp) — computed once.
-    bars = [
-        (bar_v(pct, bar_height), _meter_bar_width(w), pct)
-        for w, (_label, pct, _reset, _maxed) in zip(widths, windows)
-    ]
+    # Each window's full bar column, its bar glyph width, its pct (for the
+    # per-window colour ramp), and its vertical-label placement — the label
+    # truncated to the bar height and its top row within the bar — computed
+    # once. ``lstart`` centers the label vertically; ``cc`` is its centre
+    # column within the ``bar_w``-wide run.
+    bars = []
+    for w, (label, pct, _reset, _maxed) in zip(widths, windows):
+        bar_w = _meter_bar_width(w)
+        text_label = label[:bar_height]
+        lstart = (bar_height - len(text_label)) // 2
+        bars.append((bar_v(pct, bar_height), bar_w, pct, text_label, lstart, w))
 
     for r in range(bar_height):
         frac = (bar_height - 1 - r) / (bar_height - 1) if bar_height > 1 else 0.0
         text.append("\n")
         text.append("│", style=MUTED)
-        for w, (glyphs, bar_w, pct) in zip(widths, bars):
+        for glyphs, bar_w, pct, label, lstart, w in bars:
             glyph = glyphs[r]
-            run = _fit_center(glyph * bar_w, w)
-            if glyph == " ":
-                text.append(run)
-            else:
+            fill_style = None
+            if glyph != " ":
                 color = _bar_color(pct, frac)
-                text.append(run, style=f"{color} dim" if stale else color)
+                fill_style = f"{color} dim" if stale else color
+            in_label = lstart <= r < lstart + len(label)
+            # Left/right pads centre the ``bar_w`` run within the cell, exactly
+            # as ``_fit_center`` would (extra column on the right).
+            left_pad = (w - bar_w) // 2
+            right_pad = w - bar_w - left_pad
+            text.append(" " * left_pad)
+            if in_label:
+                cc = bar_w // 2
+                # Carve the label char: near-black on a filled glyph, light on
+                # the empty track, so it reads either way.
+                char_style = "#0d1117 bold" if glyph != " " else f"{FOREGROUND} bold"
+                text.append(glyph * cc, style=fill_style)
+                text.append(label[r - lstart], style=char_style)
+                text.append(glyph * (bar_w - cc - 1), style=fill_style)
+            else:
+                text.append(glyph * bar_w, style=fill_style)
+            text.append(" " * right_pad)
         text.append("│", style=MUTED)
 
     text.append("\n")
     text.append("│", style=MUTED)
-    for w, (_glyphs, bar_w, _pct) in zip(widths, bars):
+    for glyphs, bar_w, _pct, _label, _lstart, w in bars:
         text.append(_fit_center("─" * bar_w, w), style=TRACK)
     text.append("│", style=MUTED)
 
-    text.append("\n")
-    text.append("│", style=MUTED)
-    for w, (label, _pct, _reset, _maxed) in zip(widths, windows):
-        text.append(_fit_center(label, w), style=MUTED)
-    text.append("│", style=MUTED)
-
-    # Percent as large 3-row block digits, glanceable at a distance. A window
+    # Percent as large 5-row block digits, glanceable at a distance. A window
     # whose cell can't hold the big digits falls back to a small "NN%" token
-    # on the middle row, keeping every card exactly 3 percent rows tall.
+    # on the middle row, keeping every card exactly 5 percent rows tall.
     percent_cells = []
     for w, (_label, pct, _reset, _maxed) in zip(widths, windows):
         pct_style = f"{severity_color(pct)} dim" if stale else severity_color(pct)
-        digits = str(round(pct))
-        if 3 * len(digits) <= w:
-            cell_rows = [_fit_center(row, w) for row in big_number(digits)]
+        rows = big_number(str(round(pct)))
+        if len(rows[0]) <= w:
+            cell_rows = [_fit_center(row, w) for row in rows]
         else:
             blank = " " * w
-            cell_rows = [blank, _fit_center(f"{round(pct)}%", w), blank]
+            cell_rows = [blank, blank, _fit_center(f"{round(pct)}%", w), blank, blank]
         percent_cells.append((cell_rows, pct_style))
 
-    for r in range(3):
+    for r in range(5):
         text.append("\n")
         text.append("│", style=MUTED)
         for cell_rows, pct_style in percent_cells:
