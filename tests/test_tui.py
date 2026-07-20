@@ -22,6 +22,7 @@ from claude_swap.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui import data as tui_data
+from claude_swap.tui.widgets import gradient_color
 from claude_swap.usage_store import UsageEntry
 
 
@@ -1361,3 +1362,13 @@ class TestBareInvocation:
             cli.main()
         assert excinfo.value.code == 0
         assert launched["start"] == "watch"
+
+
+def test_gradient_color_hits_stops_and_interpolates():
+    assert gradient_color(0.0) == "#87af87"   # SEV_OK
+    assert gradient_color(0.5) == "#d7af5f"   # SEV_WARN
+    assert gradient_color(1.0) == "#d75f5f"   # SEV_CRIT
+    # quarter point = midpoint of SEV_OK(135,175,135) and SEV_WARN(215,175,95)
+    assert gradient_color(0.25) == "#afaf73"  # (175,175,115)
+    assert gradient_color(-1.0) == "#87af87"  # clamp low
+    assert gradient_color(2.0) == "#d75f5f"   # clamp high

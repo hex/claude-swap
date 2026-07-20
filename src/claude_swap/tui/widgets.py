@@ -24,6 +24,7 @@ from claude_swap.tui.theme import (
     FOREGROUND,
     MUTED,
     SEV_CRIT,
+    SEV_OK,
     SEV_WARN,
     TRACK,
     severity_color,
@@ -69,6 +70,30 @@ def bar_cells(
         else:
             text.append(_BAR_EMPTY, style=TRACK)
     return text
+
+
+_GRAD_STOPS = ((0.0, SEV_OK), (0.5, SEV_WARN), (1.0, SEV_CRIT))
+
+
+def _hex_rgb(h: str) -> tuple[int, int, int]:
+    return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
+
+
+def gradient_color(t: float) -> str:
+    """Colour for a bar cell at height fraction ``t`` (0 bottom .. 1 top):
+    interpolates SEV_OK → SEV_WARN → SEV_CRIT."""
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+    for (t0, c0), (t1, c1) in zip(_GRAD_STOPS, _GRAD_STOPS[1:]):
+        if t <= t1:
+            f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+            r0, g0, b0 = _hex_rgb(c0)
+            r1, g1, b1 = _hex_rgb(c1)
+            return "#%02x%02x%02x" % (
+                round(r0 + (r1 - r0) * f),
+                round(g0 + (g1 - g0) * f),
+                round(b0 + (b1 - b0) * f),
+            )
+    return SEV_CRIT
 
 
 def usage_bar(
