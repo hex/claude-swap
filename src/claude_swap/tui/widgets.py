@@ -498,6 +498,45 @@ def _mark_cursor(card: Text, card_width: int) -> Text:
     return marked
 
 
+def _cards_fit(ncols: int, bar_height: int, height: int, n_accounts: int) -> bool:
+    """Whether the framed card grid — at the given column count and bar
+    height, one row separator between rows — fits within ``height`` lines.
+    ``meter_grid_dims`` already shrinks ``bar_height`` down to its floor, so
+    when this is false, no card size can make the grid fit; the caller must
+    fall back to a one-line-per-account view instead of clipping."""
+    rows_of_cards = -(-n_accounts // ncols)  # ceil
+    needed = rows_of_cards * (bar_height + 6) + (rows_of_cards - 1)
+    return needed <= height
+
+
+def _compact_fallback_text(
+    accounts: list[AccountSnapshot],
+    width: int,
+    *,
+    cursor: int | None,
+    now: float,
+    flashed: set[str],
+) -> Text:
+    """One :func:`mini_account_text` line per account — the watch screen's
+    fallback when even minimum-height cards can't fit the viewport. Fits any
+    number of accounts without scrolling by trading the card layout for a
+    dense list. ``cursor`` and ``flashed`` accent a line's number prefix
+    instead of a card border."""
+    text = Text()
+    for i, acc in enumerate(accounts):
+        if i:
+            text.append("\n")
+        line = mini_account_text(acc, now)
+        if len(line.plain) > width:
+            line = line[:width]
+        if i == cursor or acc.number in flashed:
+            line = line.copy()
+            prefix_len = len(f"{acc.number:>2}") + 2
+            line.stylize(ACCENT, 0, prefix_len)
+        text.append(line)
+    return text
+
+
 def meters_grid_text(
     accounts: list[AccountSnapshot],
     width: int,
@@ -512,12 +551,18 @@ def meters_grid_text(
     separated by a blank line. ``cursor`` marks that account's card as
     selected; ``flashed`` account numbers get their card's top border
     highlighted.
+
+    When even minimum-height cards can't fit ``height`` (tiny terminals or
+    many accounts), falls back to a compact one-line-per-account view — see
+    :func:`_compact_fallback_text` — rather than clipping cards silently.
     """
     if not accounts:
         return Text("no accounts", style=MUTED)
 
     flashed = flashed or set()
     ncols, card_width, bar_height = meter_grid_dims(width, height, len(accounts))
+    if not _cards_fit(ncols, bar_height, height, len(accounts)):
+        return _compact_fallback_text(accounts, width, cursor=cursor, now=now, flashed=flashed)
     cards = [
         meter_card(acc, card_width, bar_height, now=now, flash=acc.number in flashed)
         for acc in accounts
@@ -825,9 +870,11 @@ class MetersGrid(Static):
         n = len(snap.accounts) if snap else 0
         if n == 0:
             return 1
-        ncols, _card_width, _bar_height = meter_grid_dims(
+        ncols, _card_width, bar_height = meter_grid_dims(
             self.size.width, self.size.height, n
         )
+        if not _cards_fit(ncols, bar_height, self.size.height, n):
+            return 1  # compact fallback renders as a single vertical column
         return ncols
 
     def move_cursor(self, dx: int, dy: int) -> None:

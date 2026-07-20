@@ -990,6 +990,30 @@ class TestWatchScreen:
             rendered_lines = grid.render().plain.count("\n") + 1
             assert rendered_lines <= grid.size.height
 
+    async def test_grid_fallback_cursor_moves_through_compact_list(self, tmp_path):
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2), make_account(3)],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(30, 12)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            from claude_swap.tui.widgets import MetersGrid
+
+            grid = app.screen.query_one("#meters", MetersGrid)
+            assert grid._ncols() == 1  # fallback list is effectively one column
+            assert grid.cursor == 0
+            rendered_lines = grid.render().plain.count("\n") + 1
+            assert rendered_lines <= grid.size.height
+            await pilot.press("j")  # down moves to the next account in the list
+            await pilot.pause()
+            assert grid.cursor == 1
+            assert grid.selected_number() == "2"
+
     async def test_selection_anchors_to_active_after_pre_snapshot_arm(self, tmp_path):
         """``s`` pressed before the initial snapshot lands must still end up
         selecting the active account once data arrives, not slot 1."""
@@ -1827,6 +1851,32 @@ def test_meters_grid_text_empty_accounts():
 
     out = meters_grid_text([], 44, 16, now=time.time())
     assert out.plain == "no accounts"
+
+
+def test_meters_grid_text_falls_back_to_compact_when_cards_cannot_fit():
+    from claude_swap.tui.widgets import meters_grid_text
+
+    accounts = _make_three_meter_accounts()
+    out = meters_grid_text(accounts, 30, 12, now=time.time())
+    lines = out.plain.split("\n")
+    assert len(lines) <= 12  # fits the viewport instead of clipping
+    assert "╭" not in out.plain  # compact form, not framed cards
+    for acc, line in zip(accounts, lines):
+        assert line.lstrip().startswith(str(acc.number))
+
+
+def test_meters_grid_text_fallback_cursor_marks_selected_line():
+    from claude_swap.tui.widgets import meters_grid_text
+
+    accounts = _make_three_meter_accounts()
+    now = time.time()
+    marked0 = meters_grid_text(accounts, 30, 12, cursor=0, now=now)
+    marked1 = meters_grid_text(accounts, 30, 12, cursor=1, now=now)
+
+    cols0 = _accent_cols_by_line(marked0)
+    cols1 = _accent_cols_by_line(marked1)
+    assert 0 in cols0 and 1 not in cols0  # cursor=0 accents only line 0
+    assert 1 in cols1 and 0 not in cols1  # cursor=1 accents only line 1
 
 
 def _snap_with_fetched_at(fetched_at: float) -> AccountsSnapshot:
