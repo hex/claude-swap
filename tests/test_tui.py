@@ -22,7 +22,7 @@ from claude_swap.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui import data as tui_data
-from claude_swap.tui.widgets import bar_v, gradient_color
+from claude_swap.tui.widgets import bar_v, gradient_color, meter_windows
 from claude_swap.usage_store import UsageEntry
 
 
@@ -1382,3 +1382,21 @@ def test_bar_v_fill_from_bottom():
     assert bar_v(75.0, 4)  == [" ", "█", "█", "█"]
     assert bar_v(62.5, 4)  == [" ", "▄", "█", "█"]   # partial top cell
     assert bar_v(150.0, 2) == ["█", "█"]             # clamps to 100
+
+
+def test_meter_windows_order_and_fields():
+    now = 1_000_000.0
+
+    def _iso(offset: float) -> str:
+        return datetime.fromtimestamp(now + offset, tz=timezone.utc).isoformat()
+
+    last_good = {
+        "five_hour": {"pct": 78.0, "resets_at": _iso(3 * 3600)},
+        "seven_day": {"pct": 34.0, "resets_at": _iso(4 * 86400)},
+        "scoped": [{"name": "Fable", "pct": 100.0, "resets_at": _iso(3600)}],
+    }
+    rows = meter_windows(last_good, now)
+    assert [r[0] for r in rows] == ["5h", "7d", "Fable"]
+    assert [r[1] for r in rows] == [78.0, 34.0, 100.0]
+    assert [r[3] for r in rows] == [False, False, True]
+    assert meter_windows(None, now) == []

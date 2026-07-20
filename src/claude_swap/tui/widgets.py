@@ -204,6 +204,37 @@ def usage_rows(
     return rows
 
 
+def _short_reset(window: dict, now: float) -> str | None:
+    """Largest-unit reset, e.g. 'resets 2h 13m' -> '2h'."""
+    full = data.reset_text(window, now)
+    if not full:
+        return None
+    body = full.replace("resets ", "").strip()
+    return body.split()[0] if body else None
+
+
+def meter_windows(
+    last_good: dict | None, now: float
+) -> list[tuple[str, float, str | None, bool]]:
+    """(label, pct, short_reset, maxed) per window — spend, 5h, 7d, scoped."""
+    out: list[tuple[str, float, str | None, bool]] = []
+    if not isinstance(last_good, dict):
+        return out
+    spend = last_good.get("spend")
+    if spend:
+        pct = float(spend["pct"])
+        out.append(("$$", pct, _short_reset(spend, now), pct >= 100))
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = last_good.get(key)
+        if w:
+            pct = float(w["pct"])
+            out.append((label, pct, _short_reset(w, now), pct >= 100))
+    for w in last_good.get("scoped") or []:
+        pct = float(w["pct"])
+        out.append((w["name"], pct, _short_reset(w, now), pct >= 100))
+    return out
+
+
 def account_card_text(
     acc: AccountSnapshot,
     width: int,
