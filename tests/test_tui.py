@@ -973,6 +973,66 @@ class TestWatchScreen:
             await pilot.pause()
             assert grid.cursor == 1
 
+    async def test_grid_content_fits_small_terminal_without_clipping(self, tmp_path):
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2), make_account(3)],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(44, 24)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            from claude_swap.tui.widgets import MetersGrid
+
+            grid = app.screen.query_one("#meters", MetersGrid)
+            assert grid._ncols() == 2
+            rendered_lines = grid.render().plain.count("\n") + 1
+            assert rendered_lines <= grid.size.height
+
+    async def test_selection_anchors_to_active_after_pre_snapshot_arm(self, tmp_path):
+        """``s`` pressed before the initial snapshot lands must still end up
+        selecting the active account once data arrives, not slot 1."""
+
+        class BlockingFakeSwitcher(FakeSwitcher):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.release = threading.Event()
+
+            def accounts_snapshot(self, fetch=None):
+                self.release.wait(5)
+                return super().accounts_snapshot(fetch)
+
+        fake = BlockingFakeSwitcher(
+            [make_account(1), make_account(2, active=True), make_account(3)],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            assert app.snapshot is None  # initial refresh hasn't landed yet
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            from claude_swap.tui.widgets import MetersGrid
+
+            grid = app.screen.query_one("#meters", MetersGrid)
+            assert grid.cursor == 0  # arms at the fallback default, snapshot unknown
+
+            fake.release.set()
+            await settle(pilot)
+
+            assert grid.selected_number() == "2"  # anchored to the active account
+
+            # Membership changing later must keep the cursor in range too.
+            shrunk = dataclasses.replace(
+                app.snapshot, accounts=app.snapshot.accounts[:1]
+            )
+            app.snapshot = shrunk
+            await pilot.pause()
+            assert grid.cursor is not None
+            assert grid.cursor < len(shrunk.accounts)
+
     async def test_s_arms_selection_switch_stays_watching(self, tmp_path):
         fake = self._fake(tmp_path)
         app = make_app(fake)
@@ -1560,6 +1620,37 @@ def test_meter_card_header_and_row_styling():
 
     # MAXED window's reset (Fable, exactly 2 days out -> "2d") is SEV_CRIT
     assert any("2d" in t for t in texts_with_style(SEV_CRIT))
+
+
+def test_meter_card_header_honors_alias():
+    from claude_swap.tui.widgets import meter_card
+
+    now = time.time()
+    aliased = make_account(
+        1,
+        active=True,
+        email="work@acme.dev",
+        alias="acme",
+        entry=make_entry(pct5=78.0, pct7=34.0),
+    )
+    unaliased = make_account(
+        2,
+        active=True,
+        email="work@acme.dev",
+        entry=make_entry(pct5=78.0, pct7=34.0),
+    )
+
+    aliased_card = meter_card(aliased, 21, 5, now=now)
+    unaliased_card = meter_card(unaliased, 21, 5, now=now)
+
+    assert "acme" in aliased_card.plain
+    assert "work" not in aliased_card.plain
+    assert "work" in unaliased_card.plain
+
+    for card in (aliased_card, unaliased_card):
+        lines = card.plain.split("\n")
+        assert len(lines) == 5 + 6
+        assert all(len(ln) == 21 for ln in lines)
 
 
 def test_meter_card_stale_dims_bars_and_percent():

@@ -26,7 +26,13 @@ from textual.screen import Screen
 from textual.widgets import Footer, ListView, Static
 
 from claude_swap.models import AccountsSnapshot
-from claude_swap.tui.widgets import AccountItem, AccountsPanel, MenuItem, MetersGrid
+from claude_swap.tui.widgets import (
+    AccountItem,
+    AccountsPanel,
+    MenuItem,
+    MetersGrid,
+    _active_index,
+)
 
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
@@ -191,13 +197,6 @@ class DashboardScreen(Screen):
 
     def action_cursor_up(self) -> None:
         self.query_one("#menu", ListView).action_cursor_up()
-
-
-def _active_index(snap: AccountsSnapshot) -> int:
-    return next(
-        (i for i, acc in enumerate(snap.accounts) if acc.number == snap.active_number),
-        0,
-    )
 
 
 class AccountListScreen(Screen):

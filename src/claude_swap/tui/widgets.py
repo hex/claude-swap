@@ -294,7 +294,7 @@ def _meter_header(acc: AccountSnapshot, card_width: int) -> Text:
     exactly ``card_width`` columns.
     """
     number = str(acc.number)
-    name = acc.email.split("@", 1)[0]
+    name = acc.alias or acc.email.split("@", 1)[0]
     active_suffix = " ●" if acc.is_active else ""
     prefix = "╭─┤ "
 
@@ -730,6 +730,13 @@ class AccountsPanel(Static):
         return text
 
 
+def _active_index(snap: AccountsSnapshot) -> int:
+    return next(
+        (i for i, acc in enumerate(snap.accounts) if acc.number == snap.active_number),
+        0,
+    )
+
+
 class MetersGrid(Static):
     """The watch screen's tiled vertical-meter grid, with a keyboard-navigable
     cursor over the accounts."""
@@ -737,6 +744,7 @@ class MetersGrid(Static):
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.cursor: int | None = None
+        self._numbers: list[str] = []
         self._stamps: dict[str, float | None] = {}
         self._flash: set[str] = set()
         self._flash_gen: dict[str, int] = {}
@@ -746,8 +754,28 @@ class MetersGrid(Static):
 
     def _on_snapshot(self, snap: AccountsSnapshot | None) -> None:
         if snap is not None:
+            self._anchor_cursor(snap)
             self._flash_updated(snap)
         self.refresh(layout=True)
+
+    def _anchor_cursor(self, snap: AccountsSnapshot) -> None:
+        """Keep an armed cursor pointed at a real account.
+
+        Selection can be armed (``WatchScreen._set_selecting``) before the
+        first snapshot ever lands, when there's no account list yet to
+        anchor against — it defaults the cursor to slot 0. The first
+        snapshot that arrives afterward re-anchors it to the active
+        account. Later, if account membership changes while armed, the
+        cursor is clamped back into range rather than left pointing past
+        the end (or into a different account) of a now-shorter list.
+        """
+        numbers = [acc.number for acc in snap.accounts]
+        if self.cursor is not None:
+            if not self._numbers:
+                self.cursor = _active_index(snap) if numbers else None
+            elif numbers != self._numbers:
+                self.cursor = min(self.cursor, len(numbers) - 1) if numbers else None
+        self._numbers = numbers
 
     def _flash_updated(self, snap: AccountsSnapshot) -> None:
         """Briefly highlight cards whose stored measurement just advanced.
@@ -784,7 +812,7 @@ class MetersGrid(Static):
             return Text("No managed accounts yet.", style=MUTED)
         return meters_grid_text(
             snap.accounts,
-            self.size.width - 2,
+            self.size.width,
             self.size.height,
             cursor=self.cursor,
             now=time.time(),
@@ -798,7 +826,7 @@ class MetersGrid(Static):
         if n == 0:
             return 1
         ncols, _card_width, _bar_height = meter_grid_dims(
-            self.size.width - 2, self.size.height, n
+            self.size.width, self.size.height, n
         )
         return ncols
 
