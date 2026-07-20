@@ -1670,7 +1670,9 @@ def test_meter_card_reset_is_plain_single_row():
         "seven_day": {"pct": 34.0, "resets_at": _iso(3 * 86400)},
     }
     entry = UsageEntry(last_good=last_good, fetched_at=now - 5.0, age_s=5.0)
-    acc = make_account(1, active=True, email="work@acme.dev", entry=entry)
+    # inactive account: keeps the single-line frame this test's glyph checks
+    # rely on — the active card's border is covered separately.
+    acc = make_account(1, email="work@acme.dev", entry=entry)
     bar_height = 10
     card = meter_card(acc, 34, bar_height, now=now)
     lines = card.plain.split("\n")
@@ -1704,9 +1706,10 @@ def test_meter_card_reset_is_plain_single_row():
 def test_meter_card_percent_has_margin_rows():
     from claude_swap.tui.widgets import meter_card
 
+    # inactive account: keeps the single-line frame this test's glyph checks
+    # rely on — the active card's border is covered separately.
     acc = make_account(
         1,
-        active=True,
         email="work@acme.dev",
         entry=make_entry(pct5=78.0, pct7=34.0, scoped=[("Fable", 100.0)]),
     )
@@ -1733,9 +1736,9 @@ def test_meter_card_percent_has_margin_rows():
     assert is_blank_interior(lines[percent_end])
 
 
-def test_meter_card_active_green_border():
-    from claude_swap.tui.widgets import meter_card
-    from claude_swap.tui.theme import MUTED, SEV_OK
+def test_meter_card_active_double_green_border():
+    from claude_swap.tui.widgets import _ACTIVE_GREEN, meter_card
+    from claude_swap.tui.theme import MUTED
 
     entry = make_entry(pct5=78.0, pct7=34.0)
     active = make_account(1, active=True, email="work@acme.dev", entry=entry)
@@ -1743,6 +1746,7 @@ def test_meter_card_active_green_border():
     now = time.time()
     acard = meter_card(active, 21, 5, now=now)
     icard = meter_card(inactive, 21, 5, now=now)
+    active_style = f"{_ACTIVE_GREEN} bold"
 
     def frame_styles(card, glyphs):
         return {
@@ -1751,13 +1755,32 @@ def test_meter_card_active_green_border():
             if set(card.plain[sp.start : sp.end]) & set(glyphs)
         }
 
-    # active: the interior side bars and top/bottom borders are green
-    assert SEV_OK in frame_styles(acard, "│")
-    assert SEV_OK in frame_styles(acard, "╭╮╰╯")
-    # inactive: the same frame glyphs are muted, never green
+    # active: double-line box glyphs, bold bright-green frame, no single-line
+    # glyphs anywhere in the card
+    assert "║" in acard.plain
+    assert all(g in acard.plain for g in "╔╗╚╝")
+    assert "│" not in acard.plain
+    assert not (set(acard.plain) & set("╭╮╰╯"))
+    assert active_style in frame_styles(acard, "║")
+    assert active_style in frame_styles(acard, "╔╗╚╝")
+
+    # active: the header number, name, and active dot render in the same
+    # bold bright-green style as the frame, not ACCENT/FOREGROUND
+    def texts_with_style(card, style):
+        return [card.plain[sp.start : sp.end] for sp in card.spans if sp.style == style]
+
+    assert "1" in texts_with_style(acard, active_style)
+    assert "work" in texts_with_style(acard, active_style)
+    assert "●" in texts_with_style(acard, active_style)
+
+    # inactive: unchanged thin rounded single-line frame, muted, never green
+    assert "│" in icard.plain
+    assert all(g in icard.plain for g in "╭╮╰╯")
+    assert "║" not in icard.plain
+    assert not (set(icard.plain) & set("╔╗╚╝"))
     assert MUTED in frame_styles(icard, "│")
-    assert SEV_OK not in frame_styles(icard, "│")
-    assert SEV_OK not in frame_styles(icard, "╭╮╰╯")
+    assert active_style not in frame_styles(icard, "│")
+    assert active_style not in frame_styles(icard, "╭╮╰╯")
 
 
 def test_meter_card_percent_is_five_big_rows():
@@ -1786,9 +1809,10 @@ def test_meter_card_structure():
     from claude_swap.tui.widgets import meter_card
     from claude_swap.tui.theme import SEV_OK
 
+    # inactive account: keeps the single-line frame this test's glyph checks
+    # rely on — the active card's border is covered separately.
     acc = make_account(
         1,
-        active=True,
         email="work@acme.dev",
         entry=make_entry(pct5=78.0, pct7=34.0, scoped=[("Fable", 100.0)]),
     )
@@ -1870,7 +1894,9 @@ def test_meter_card_header_and_row_styling():
         "scoped": [{"name": "Fable", "pct": 100.0, "resets_at": _iso(2 * 86400)}],
     }
     entry = UsageEntry(last_good=last_good, fetched_at=now - 5.0, age_s=5.0)
-    acc = make_account(1, active=True, email="work@acme.dev", entry=entry)
+    # inactive account: the active card's header renders in the bright-green
+    # frame style instead of ACCENT/FOREGROUND — covered separately.
+    acc = make_account(1, email="work@acme.dev", entry=entry)
 
     card = meter_card(acc, 21, 5, now=now)
 
@@ -2033,7 +2059,9 @@ def test_meters_grid_text_two_columns():
     accounts = _make_three_meter_accounts()
     out = meters_grid_text(accounts, 44, 31, now=time.time())
     lines = out.plain.split("\n")
-    assert lines[0].count("╭") == 2  # two cards side by side on row 1
+    # two cards side by side on row 1: account 1 is active (double-line ╔),
+    # account 2 is not (single-line rounded ╭).
+    assert lines[0].count("╭") + lines[0].count("╔") == 2
     assert len(lines) <= 31  # the whole grid fits the device height
 
 

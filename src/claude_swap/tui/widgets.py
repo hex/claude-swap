@@ -42,6 +42,15 @@ _BAR_TICK = "┃"
 
 _FLASH_S = 1.5  # how long a just-refreshed card's border stays highlighted
 
+_ACTIVE_GREEN = "#3fb950"  # bright green frame/title for the active account's card
+
+# Frame glyph sets keyed by whether the card belongs to the active account:
+# active cards get a bold double-line box, inactive cards the thin rounded one.
+_FRAME_GLYPHS = {
+    True: {"tl": "╔", "tr": "╗", "bl": "╚", "br": "╝", "h": "═", "v": "║"},
+    False: {"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯", "h": "─", "v": "│"},
+}
+
 # meter_card's non-bar rows: top+bottom borders (2), baseline (1), window
 # labels (1), a blank margin row (1), big-digit percent (5), a blank margin
 # row (1), reset (1).
@@ -340,24 +349,34 @@ def big_number(s: str) -> list[str]:
     return rows
 
 
-def _meter_header(acc: AccountSnapshot, card_width: int, frame: str = MUTED) -> Text:
-    """``╭─┤ {number} {name} {● if active}├────╮``.
+def _meter_header(
+    acc: AccountSnapshot, card_width: int, frame: str = MUTED, *, active: bool = False
+) -> Text:
+    """``╭─┤ {number} {name} {● if active}├────╮`` (the active account's card
+    uses the double-line ``╔═┤ … ├────╗`` variant instead).
 
     Degrades under a tight ``card_width``: the name is hard-truncated first,
     then dropped along with the active dot, and if even the bare number
-    can't be framed, this falls back to a plain ``╭──…──╮`` border. Always
-    exactly ``card_width`` columns.
+    can't be framed, this falls back to a plain corner-to-corner border.
+    Always exactly ``card_width`` columns.
     """
+    glyphs = _FRAME_GLYPHS[active]
     number = str(acc.number)
     name = acc.alias or acc.email.split("@", 1)[0]
     active_suffix = " ●" if acc.is_active else ""
-    prefix = "╭─┤ "
+    prefix = f"{glyphs['tl']}{glyphs['h']}┤ "
+    number_style = frame if active else ACCENT
+    name_style = frame if active else FOREGROUND
+    dot_style = frame if active else ACCENT
 
-    # Minimal frame: prefix + number + "├" + "╮", no name, no active dot,
+    # Minimal frame: prefix + number + "├" + tr, no name, no active dot,
     # no fill. If even this doesn't fit, there's no room for a framed title.
     base_len = len(prefix) + len(number) + 1 + 1
     if base_len > card_width:
-        return Text("╭" + "─" * max(0, card_width - 2) + "╮", style=frame)
+        return Text(
+            glyphs["tl"] + glyphs["h"] * max(0, card_width - 2) + glyphs["tr"],
+            style=frame,
+        )
 
     available = card_width - base_len
     active_part = active_suffix if len(active_suffix) <= available else ""
@@ -366,23 +385,23 @@ def _meter_header(acc: AccountSnapshot, card_width: int, frame: str = MUTED) -> 
 
     text = Text()
     text.append(prefix, style=frame)
-    text.append(number, style=ACCENT)
+    text.append(number, style=number_style)
     if name:
         text.append(" ", style=frame)
-        text.append(name, style=FOREGROUND)
+        text.append(name, style=name_style)
     if active_part:
         text.append(" ", style=frame)
-        text.append("●", style=ACCENT)
+        text.append("●", style=dot_style)
     text.append("├", style=frame)
     fill_len = max(0, card_width - len(text.plain) - 1)
-    text.append("─" * fill_len, style=frame)
-    text.append("╮", style=frame)
+    text.append(glyphs["h"] * fill_len, style=frame)
+    text.append(glyphs["tr"], style=frame)
 
     # Final safety net: guarantee exact width regardless of the arithmetic
     # above, since callers rely on every meter_card line being card_width.
     plain_len = len(text.plain)
     if plain_len < card_width:
-        text.append("─" * (card_width - plain_len), style=frame)
+        text.append(glyphs["h"] * (card_width - plain_len), style=frame)
     elif plain_len > card_width:
         text = text[:card_width]
     return text
@@ -423,12 +442,18 @@ def meter_card(
     watch screen's meter grid. ``flash`` highlights the top border to signal
     a just-refreshed measurement."""
     interior_width = card_width - 2
-    # An active account's card wears a green frame; the rest are muted.
-    frame = SEV_OK if acc.is_active else MUTED
-    bottom_border = "╰" + "─" * (card_width - 2) + "╯"
+    # An active account's card wears a bold bright-green double-line frame;
+    # the rest wear the thin muted single-line one.
+    active = acc.is_active
+    frame_glyphs = _FRAME_GLYPHS[active]
+    frame = f"{_ACTIVE_GREEN} bold" if active else MUTED
+    side = frame_glyphs["v"]
+    bottom_border = (
+        frame_glyphs["bl"] + frame_glyphs["h"] * (card_width - 2) + frame_glyphs["br"]
+    )
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
     text = Text()
-    header = _meter_header(acc, card_width, frame)
+    header = _meter_header(acc, card_width, frame, active=active)
     if flash:
         header = Text(header.plain, style=f"bold {ACCENT}")
     text.append(header)
@@ -451,13 +476,13 @@ def meter_card(
         start_row = (n_blank - len(wrapped)) // 2
         for i in range(n_blank):
             text.append("\n")
-            text.append("│", style=frame)
+            text.append(side, style=frame)
             idx = i - start_row
             if 0 <= idx < len(wrapped):
                 text.append(_fit_center(wrapped[idx], interior_width), style=MUTED)
             else:
                 text.append(" " * interior_width)
-            text.append("│", style=frame)
+            text.append(side, style=frame)
         text.append("\n")
         text.append(bottom_border, style=frame)
         return _to_exact_width(text, card_width)
@@ -473,7 +498,7 @@ def meter_card(
     for r in range(bar_height):
         frac = (bar_height - 1 - r) / (bar_height - 1) if bar_height > 1 else 0.0
         text.append("\n")
-        text.append("│", style=frame)
+        text.append(side, style=frame)
         for glyphs, bar_w, pct, w in bars:
             glyph = glyphs[r]
             fill_style = None
@@ -487,26 +512,26 @@ def meter_card(
             text.append(" " * left_pad)
             text.append(glyph * bar_w, style=fill_style)
             text.append(" " * right_pad)
-        text.append("│", style=frame)
+        text.append(side, style=frame)
 
     text.append("\n")
-    text.append("│", style=frame)
+    text.append(side, style=frame)
     for glyphs, bar_w, _pct, w in bars:
         text.append(_fit_center("─" * bar_w, w), style=TRACK)
-    text.append("│", style=frame)
+    text.append(side, style=frame)
 
     # Plain bold label row: each window's name, centred in its cell.
     text.append("\n")
-    text.append("│", style=frame)
+    text.append(side, style=frame)
     for w, (label, _pct, _reset, _maxed) in zip(widths, windows):
         text.append(_fit_label(label, w), style=f"bold {FOREGROUND}")
-    text.append("│", style=frame)
+    text.append(side, style=frame)
 
     # Blank margin row above the percent block.
     text.append("\n")
-    text.append("│", style=frame)
+    text.append(side, style=frame)
     text.append(" " * interior_width)
-    text.append("│", style=frame)
+    text.append(side, style=frame)
 
     # Percent as large 5-row block digits, glanceable at a distance. A window
     # whose cell can't hold the big digits falls back to a small "NN%" token
@@ -524,24 +549,24 @@ def meter_card(
 
     for r in range(5):
         text.append("\n")
-        text.append("│", style=frame)
+        text.append(side, style=frame)
         for cell_rows, pct_style in percent_cells:
             text.append(cell_rows[r], style=pct_style)
-        text.append("│", style=frame)
+        text.append(side, style=frame)
 
     # Blank margin row below the percent block.
     text.append("\n")
-    text.append("│", style=frame)
+    text.append(side, style=frame)
     text.append(" " * interior_width)
-    text.append("│", style=frame)
+    text.append(side, style=frame)
 
     # Plain reset countdown row, one cell per window.
     text.append("\n")
-    text.append("│", style=frame)
+    text.append(side, style=frame)
     for w, (_label, _pct, reset, maxed) in zip(widths, windows):
         reset_style = SEV_CRIT if maxed else MUTED
         text.append(_fit_center(reset or "", w), style=reset_style)
-    text.append("│", style=frame)
+    text.append(side, style=frame)
 
     text.append("\n")
     text.append(bottom_border, style=frame)
