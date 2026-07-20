@@ -42,6 +42,10 @@ _BAR_TICK = "┃"
 
 _FLASH_S = 1.5  # how long a just-refreshed card's border stays highlighted
 
+# meter_card's non-bar rows: top+bottom borders (2), baseline (1), label (1),
+# big-digit percent (3), reset (1).
+CARD_CHROME = 8
+
 
 def bar_cells(
     pct: float | None,
@@ -260,7 +264,7 @@ def meter_grid_dims(
     *,
     min_card_w: int = 20,
     bar_min: int = 1,
-    card_chrome: int = 6,
+    card_chrome: int = CARD_CHROME,
     gutter: int = 1,
 ) -> tuple[int, int, int]:
     """(ncols, card_width, bar_height) for the meter grid at this terminal size.
@@ -296,6 +300,30 @@ def _fit_center(s: str, width: int) -> str:
     """Center ``s`` in ``width`` columns, truncating first so the result is
     always exactly ``width`` wide even when ``s`` is longer than the cell."""
     return s[:width].center(width)
+
+
+_BIG_DIGITS = {
+    "0": (" _ ", "| |", "|_|"),
+    "1": ("   ", "  |", "  |"),
+    "2": (" _ ", " _|", "|_ "),
+    "3": (" _ ", " _|", " _|"),
+    "4": ("   ", "|_|", "  |"),
+    "5": (" _ ", "|_ ", " _|"),
+    "6": (" _ ", "|_ ", "|_|"),
+    "7": (" _ ", "  |", "  |"),
+    "8": (" _ ", "|_|", "|_|"),
+    "9": (" _ ", "|_|", " _|"),
+}
+
+
+def big_number(s: str) -> list[str]:
+    """Render a digit string as 3 rows of large glyphs (each digit 3 cols)."""
+    rows = ["", "", ""]
+    for ch in s:
+        g = _BIG_DIGITS.get(ch, ("   ", "   ", "   "))
+        for i in range(3):
+            rows[i] += g[i]
+    return rows
 
 
 def _meter_header(acc: AccountSnapshot, card_width: int) -> Text:
@@ -376,10 +404,10 @@ def meter_card(
     flash: bool = False,
 ) -> Text:
     """A framed vertical-meter card: header, one bar column per window, and
-    baseline/label/percent/reset rows beneath. Always ``bar_height + 6``
-    lines of exactly ``card_width`` columns — used by the watch screen's
-    meter grid. ``flash`` highlights the top border to signal a just-refreshed
-    measurement."""
+    baseline/label/percent/reset rows beneath. Always
+    ``bar_height + CARD_CHROME`` lines of exactly ``card_width`` columns —
+    used by the watch screen's meter grid. ``flash`` highlights the top
+    border to signal a just-refreshed measurement."""
     interior_width = card_width - 2
     bottom_border = "╰" + "─" * (card_width - 2) + "╯"
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
@@ -394,7 +422,7 @@ def meter_card(
     else:
         windows = meter_windows(acc.usage.last_good, now)
     if not windows:
-        n_blank = bar_height + 4
+        n_blank = bar_height + CARD_CHROME - 2
         label = (
             data.sentinel_label(acc.usage.sentinel)
             if acc.usage.sentinel is not None
@@ -452,12 +480,26 @@ def meter_card(
         text.append(_fit_center(label, w), style=MUTED)
     text.append("│", style=MUTED)
 
-    text.append("\n")
-    text.append("│", style=MUTED)
+    # Percent as large 3-row block digits, glanceable at a distance. A window
+    # whose cell can't hold the big digits falls back to a small "NN%" token
+    # on the middle row, keeping every card exactly 3 percent rows tall.
+    percent_cells = []
     for w, (_label, pct, _reset, _maxed) in zip(widths, windows):
         pct_style = f"{severity_color(pct)} dim" if stale else severity_color(pct)
-        text.append(_fit_center(f"{round(pct)}%", w), style=pct_style)
-    text.append("│", style=MUTED)
+        digits = str(round(pct))
+        if 3 * len(digits) <= w:
+            cell_rows = [_fit_center(row, w) for row in big_number(digits)]
+        else:
+            blank = " " * w
+            cell_rows = [blank, _fit_center(f"{round(pct)}%", w), blank]
+        percent_cells.append((cell_rows, pct_style))
+
+    for r in range(3):
+        text.append("\n")
+        text.append("│", style=MUTED)
+        for cell_rows, pct_style in percent_cells:
+            text.append(cell_rows[r], style=pct_style)
+        text.append("│", style=MUTED)
 
     text.append("\n")
     text.append("│", style=MUTED)
@@ -519,7 +561,7 @@ def _cards_fit(ncols: int, bar_height: int, height: int, n_accounts: int) -> boo
     when this is false, no card size can make the grid fit; the caller must
     fall back to a one-line-per-account view instead of clipping."""
     rows_of_cards = -(-n_accounts // ncols)  # ceil
-    needed = rows_of_cards * (bar_height + 6) + (rows_of_cards - 1)
+    needed = rows_of_cards * (bar_height + CARD_CHROME) + (rows_of_cards - 1)
     return needed <= height
 
 
