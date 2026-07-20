@@ -246,16 +246,15 @@ def meter_grid_dims(
     *,
     min_card_w: int = 20,
     bar_min: int = 1,
-    bar_max: int = 20,
     card_chrome: int = 6,
     gutter: int = 1,
 ) -> tuple[int, int, int]:
     """(ncols, card_width, bar_height) for the meter grid at this terminal size.
 
     Columns account for the inter-card gutter so a card never falls below
-    ``min_card_w`` by ignoring it. Bars shrink to fit the available height
-    (down to ``bar_min``) rather than overflow — the grid is not scrollable —
-    and never grow past ``bar_max``.
+    ``min_card_w`` by ignoring it. Bars fill the available height — growing to
+    consume every spare row and shrinking (down to ``bar_min``) rather than
+    overflow, since the grid is not scrollable.
     """
     n = max(1, n_accounts)
     ncols = max(1, min((width + 1) // (min_card_w + gutter), n))
@@ -264,7 +263,6 @@ def meter_grid_dims(
     seps = rows_of_cards - 1
     avail = height - rows_of_cards * card_chrome - seps
     bar_height = max(bar_min, avail // rows_of_cards)
-    bar_height = min(bar_height, bar_max)
     return ncols, card_width, bar_height
 
 
@@ -276,7 +274,8 @@ def _cell_widths(interior_width: int, n_windows: int) -> list[int]:
 
 
 def _meter_bar_width(cell_width: int) -> int:
-    return max(1, min(cell_width - 2, 5))
+    """Bar fills its cell, leaving a one-column gutter on each side."""
+    return max(1, cell_width - 2)
 
 
 def _fit_center(s: str, width: int) -> str:

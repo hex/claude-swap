@@ -1542,6 +1542,24 @@ def test_meter_grid_dims_honors_gutter_min_card_width():
     assert cw >= 20
 
 
+def test_meter_grid_dims_bars_fill_tall_terminal():
+    from claude_swap.tui.widgets import meter_grid_dims
+
+    # one account on a tall terminal: the bar consumes the spare rows
+    # (no fixed height cap), leaving only the 6-line card chrome.
+    _ncols, _cw, bh = meter_grid_dims(40, 40, 1)
+    assert bh == 40 - 6
+
+
+def test_meter_bar_width_fills_cell():
+    from claude_swap.tui.widgets import _meter_bar_width
+
+    # bar spans its cell minus a one-column gutter each side (no width cap)
+    assert _meter_bar_width(15) == 13
+    assert _meter_bar_width(30) == 28
+    assert _meter_bar_width(4) == 2
+
+
 def test_meter_card_structure():
     from claude_swap.tui.widgets import meter_card
     from claude_swap.tui.theme import SEV_OK
