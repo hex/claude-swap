@@ -1449,3 +1449,67 @@ def test_meter_card_handles_no_windows():
     lines = card.plain.split("\n")
     assert len(lines) == 5 + 6
     assert all(len(ln) == 21 for ln in lines)
+
+
+def test_meter_card_exact_width_at_narrow_widths():
+    from claude_swap.tui.widgets import meter_card
+
+    acc = make_account(
+        1,
+        active=True,
+        email="work@acme.dev",
+        entry=make_entry(pct5=78.0, pct7=34.0, scoped=[("Fable", 100.0)]),
+    )
+    now = time.time()
+    for w in (6, 8, 12, 21):
+        card = meter_card(acc, w, 5, now=now)
+        assert all(len(ln) == w for ln in card.plain.split("\n")), (
+            w,
+            card.plain.split("\n"),
+        )
+
+
+def test_meter_card_header_and_row_styling():
+    from claude_swap.tui.widgets import meter_card
+    from claude_swap.tui.theme import ACCENT, FOREGROUND, SEV_CRIT, severity_color
+    from claude_swap.usage_store import UsageEntry
+
+    now = 1_000_000.0
+
+    def _iso(offset: float) -> str:
+        return datetime.fromtimestamp(now + offset, tz=timezone.utc).isoformat()
+
+    last_good = {
+        "five_hour": {"pct": 78.0, "resets_at": _iso(3 * 3600)},
+        "seven_day": {"pct": 34.0, "resets_at": _iso(4 * 86400)},
+        "scoped": [{"name": "Fable", "pct": 100.0, "resets_at": _iso(2 * 86400)}],
+    }
+    entry = UsageEntry(last_good=last_good, fetched_at=now - 5.0, age_s=5.0)
+    acc = make_account(1, active=True, email="work@acme.dev", entry=entry)
+
+    card = meter_card(acc, 21, 5, now=now)
+
+    def texts_with_style(style: str) -> list[str]:
+        return [card.plain[sp.start : sp.end] for sp in card.spans if sp.style == style]
+
+    # header: number in ACCENT, name in FOREGROUND
+    assert "1" in texts_with_style(ACCENT)
+    assert "work" in texts_with_style(FOREGROUND)
+
+    # percent row: each window's "NN%" styled by severity_color(pct)
+    for pct in (78.0, 34.0, 100.0):
+        marker = f"{round(pct)}%"
+        assert any(marker in t for t in texts_with_style(severity_color(pct)))
+
+    # MAXED window's reset (Fable, exactly 2 days out -> "2d") is SEV_CRIT
+    assert any("2d" in t for t in texts_with_style(SEV_CRIT))
+
+
+def test_fit_center_truncates_oversized_content():
+    from claude_swap.tui.widgets import _fit_center
+
+    long_label = "Anthropic-Claude-Max-Plan"
+    for w in (1, 3, 4, 5):
+        result = _fit_center(long_label, w)
+        assert len(result) == w
+    assert _fit_center(long_label, 4) == "Anth"

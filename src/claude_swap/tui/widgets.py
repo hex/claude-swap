@@ -271,26 +271,50 @@ def _fit_center(s: str, width: int) -> str:
 
 
 def _meter_header(acc: AccountSnapshot, card_width: int) -> Text:
-    """``╭─┤ {number} {name} {● if active}├────╮`` truncating name to fit."""
-    text = Text()
+    """``╭─┤ {number} {name} {● if active}├────╮``.
+
+    Degrades under a tight ``card_width``: the name is hard-truncated first,
+    then dropped along with the active dot, and if even the bare number
+    can't be framed, this falls back to a plain ``╭──…──╮`` border. Always
+    exactly ``card_width`` columns.
+    """
     number = str(acc.number)
     name = acc.email.split("@", 1)[0]
     active_suffix = " ●" if acc.is_active else ""
     prefix = "╭─┤ "
-    fixed_len = len(prefix) + len(number) + 1 + len(active_suffix) + 1 + 1
-    available = max(0, card_width - fixed_len)
-    name = name[:available]
+
+    # Minimal frame: prefix + number + "├" + "╮", no name, no active dot,
+    # no fill. If even this doesn't fit, there's no room for a framed title.
+    base_len = len(prefix) + len(number) + 1 + 1
+    if base_len > card_width:
+        return Text("╭" + "─" * max(0, card_width - 2) + "╮", style=MUTED)
+
+    available = card_width - base_len
+    active_part = active_suffix if len(active_suffix) <= available else ""
+    name_budget = max(0, available - len(active_part) - (1 if name else 0))
+    name = name[:name_budget]
+
+    text = Text()
     text.append(prefix, style=MUTED)
     text.append(number, style=ACCENT)
-    text.append(" ", style=MUTED)
-    text.append(name, style=FOREGROUND)
-    if acc.is_active:
+    if name:
+        text.append(" ", style=MUTED)
+        text.append(name, style=FOREGROUND)
+    if active_part:
         text.append(" ", style=MUTED)
         text.append("●", style=ACCENT)
     text.append("├", style=MUTED)
     fill_len = max(0, card_width - len(text.plain) - 1)
     text.append("─" * fill_len, style=MUTED)
     text.append("╮", style=MUTED)
+
+    # Final safety net: guarantee exact width regardless of the arithmetic
+    # above, since callers rely on every meter_card line being card_width.
+    plain_len = len(text.plain)
+    if plain_len < card_width:
+        text.append("─" * (card_width - plain_len), style=MUTED)
+    elif plain_len > card_width:
+        text = text[:card_width]
     return text
 
 
@@ -300,7 +324,6 @@ def meter_card(
     bar_height: int,
     *,
     now: float,
-    threshold: float | None = None,
 ) -> Text:
     """A framed vertical-meter card: header, one bar column per window, and
     baseline/label/percent/reset rows beneath. Always ``bar_height + 6``
@@ -311,9 +334,10 @@ def meter_card(
     text = Text()
     text.append(_meter_header(acc, card_width))
 
-    windows = [] if acc.usage.sentinel is not None else meter_windows(
-        acc.usage.last_good, now
-    )
+    if acc.usage.sentinel is not None:
+        windows = []
+    else:
+        windows = meter_windows(acc.usage.last_good, now)
     if not windows:
         n_blank = bar_height + 4
         label = (
