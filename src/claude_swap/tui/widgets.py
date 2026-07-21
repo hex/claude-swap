@@ -604,13 +604,18 @@ def _line_spans(card: Text) -> list[tuple[int, int]]:
     return spans
 
 
+_SELECT_BG = "#2b3648"  # highlight fill behind the account being selected
+
+
 def _mark_cursor(card: Text, card_width: int) -> Text:
-    """Recolor a card's left/right border edges to ACCENT to mark it selected."""
+    """Highlight a card as the selection cursor: tint its whole background and
+    give its left/right border edges a bold accent, so it clearly stands out."""
     marked = card.copy()
+    marked.stylize(f"on {_SELECT_BG}", 0, len(card.plain))
     offset = 0
     for line in card.plain.split("\n"):
-        marked.stylize(ACCENT, offset, offset + 1)
-        marked.stylize(ACCENT, offset + card_width - 1, offset + card_width)
+        marked.stylize(f"{ACCENT} bold", offset, offset + 1)
+        marked.stylize(f"{ACCENT} bold", offset + card_width - 1, offset + card_width)
         offset += len(line) + 1
     return marked
 

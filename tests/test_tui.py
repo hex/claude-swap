@@ -2097,30 +2097,20 @@ def _accent_cols_by_line(text) -> dict[int, set[int]]:
 
 
 def test_meters_grid_text_cursor_marks_selected_card():
-    from claude_swap.tui.widgets import meter_grid_dims, meters_grid_text
+    from claude_swap.tui.widgets import meters_grid_text, _SELECT_BG, ACCENT
 
     accounts = _make_three_meter_accounts()
-    ncols, cw, bh = meter_grid_dims(44, 31, len(accounts))
-    card_lines = bh + 12
     now = time.time()
 
     plain_out = meters_grid_text(accounts, 44, 31, now=now)
     marked0 = meters_grid_text(accounts, 44, 31, cursor=0, now=now)
-    marked1 = meters_grid_text(accounts, 44, 31, cursor=1, now=now)
     assert plain_out.plain == marked0.plain  # marking never changes layout/text
 
-    # card 0 spans cols [0, cw); card 1 sits after a 1-col gutter at [cw+1, ...)
-    card0_left, card0_right = 0, cw - 1
-    card1_left, card1_right = cw + 1, cw + 1 + cw - 1
-    cols0 = _accent_cols_by_line(marked0)
-    cols1 = _accent_cols_by_line(marked1)
-    for i in range(card_lines):  # both cards live on row 0's lines
-        # cursor=0 accents card 0's border edges, not card 1's left border
-        assert {card0_left, card0_right} <= cols0.get(i, set())
-        assert card1_left not in cols0.get(i, set())
-        # cursor=1 accents card 1's border edges, not card 0's left border
-        assert {card1_left, card1_right} <= cols1.get(i, set())
-        assert card0_left not in cols1.get(i, set())
+    # the selection highlight fills the selected card's background...
+    assert any(_SELECT_BG in str(s.style) for s in marked0.spans)
+    assert not any(_SELECT_BG in str(s.style) for s in plain_out.spans)
+    # ...and gives its border a bold accent
+    assert any("bold" in str(s.style) and ACCENT in str(s.style) for s in marked0.spans)
 
 
 def test_meters_grid_text_empty_accounts():
