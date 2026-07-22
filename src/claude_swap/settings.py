@@ -59,6 +59,18 @@ class AutoSwitchSettings:
 
 
 @dataclass(frozen=True)
+class UiSettings:
+    """Appearance preferences (``ui`` section). ``watch_style`` selects the
+    ``cswap watch`` layout; ``classic`` is the horizontal-bar account list and
+    ``meters`` is the vertical gradient-meter grid."""
+
+    watch_style: str = "classic"
+
+
+_SECTION_DEFAULT_SOURCES = {"autoswitch": AutoSwitchSettings, "ui": UiSettings}
+
+
+@dataclass(frozen=True)
 class SettingSpec:
     """Metadata for one user-tunable settings.json key.
 
@@ -67,9 +79,9 @@ class SettingSpec:
     (`parse_setting_value`) read from here, so the two can't drift.
     """
 
-    section: str  # top-level JSON section ("autoswitch")
+    section: str  # top-level JSON section ("autoswitch", "ui")
     json_key: str  # camelCase key inside the section
-    field: str  # snake_case AutoSwitchSettings field
+    field: str  # snake_case dataclass field
     kind: str  # "float" | "int" | "bool" | "choice"
     lo: float | None = None
     hi: float | None = None
@@ -82,7 +94,7 @@ class SettingSpec:
 
     @property
     def default(self):
-        return getattr(AutoSwitchSettings(), self.field)
+        return getattr(_SECTION_DEFAULT_SOURCES[self.section](), self.field)
 
 
 # settings.json uses camelCase (matching the repo's other JSON artifacts);
@@ -122,11 +134,17 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "autoswitch", "model", "model", "string",
             help="Also switch on these models' weekly limits (e.g. Fable, Fable,Opus, or all)",
         ),
+        SettingSpec(
+            "ui", "watchStyle", "watch_style", "choice", choices=("classic", "meters"),
+            help="cswap watch layout: classic bars or vertical meters",
+        ),
     )
 }
 
 _AUTOSWITCH_KEYS: dict[str, str] = {
-    spec.field: spec.json_key for spec in SETTING_SPECS.values()
+    spec.field: spec.json_key
+    for spec in SETTING_SPECS.values()
+    if spec.section == "autoswitch"
 }
 
 
@@ -158,6 +176,8 @@ def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
 
     kwargs = {}
     for spec in SETTING_SPECS.values():
+        if spec.section != "autoswitch":
+            continue
         value = getattr(settings, spec.field)
         if spec.kind in ("float", "int"):
             clamped = num(value, spec.default, spec.lo, spec.hi)
@@ -208,6 +228,23 @@ def load_settings(backup_root: Path) -> AutoSwitchSettings:
     except TypeError:
         settings = AutoSwitchSettings()
     return _clamped(settings)
+
+
+def load_ui_settings(backup_root: Path) -> UiSettings:
+    """Load the ui section; missing/corrupt file or unknown value → default."""
+    raw = _read_raw(settings_path(backup_root))
+    section = raw.get("ui")
+    default = UiSettings()
+    if not isinstance(section, dict):
+        return default
+    watch_style = section.get("watchStyle", default.watch_style)
+    if watch_style not in SETTING_SPECS["ui.watchStyle"].choices:
+        _logger.warning(
+            "settings.json: unsupported ui.watchStyle %r; using %r",
+            watch_style, default.watch_style,
+        )
+        return default
+    return UiSettings(watch_style=watch_style)
 
 
 def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
@@ -371,12 +408,15 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
     reflects the file, not value equality.
     """
     raw = _read_raw(settings_path(backup_root))
-    effective = load_settings(backup_root)
+    loaded = {
+        "autoswitch": load_settings(backup_root),
+        "ui": load_ui_settings(backup_root),
+    }
     rows = []
     for spec in SETTING_SPECS.values():
         section = raw.get(spec.section)
         is_set = isinstance(section, dict) and spec.json_key in section
-        rows.append((spec, getattr(effective, spec.field), is_set))
+        rows.append((spec, getattr(loaded[spec.section], spec.field), is_set))
     return rows
 
 

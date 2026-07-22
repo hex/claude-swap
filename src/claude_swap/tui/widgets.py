@@ -928,7 +928,7 @@ class MetersGrid(Static):
     def _anchor_cursor(self, snap: AccountsSnapshot) -> None:
         """Keep an armed cursor pointed at a real account.
 
-        Selection can be armed (``WatchScreen._set_selecting``) before the
+        Selection can be armed (``MeterWatchScreen._set_selecting``) before the
         first snapshot ever lands, when there's no account list yet to
         anchor against — it defaults the cursor to slot 0. The first
         snapshot that arrives afterward re-anchors it to the active

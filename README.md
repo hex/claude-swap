@@ -157,7 +157,9 @@ Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `cswap
 
 Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. `cswap watch` opens it straight to the live monitor. Works on macOS, Linux, and Windows.
 
-<img src="assets/tui-watch.png" width="760" alt="cswap watch — a responsive grid of vertical 5h/7d usage meters for every account, with reset times and the active account marked">
+<img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
+
+The watch monitor defaults to the horizontal usage-bar cards above. For a compact, glanceable view — a responsive grid of vertical gradient meters — opt in with `cswap config set ui.watchStyle meters` (restart to apply).
 
 
 ### Refresh expired tokens
@@ -253,6 +255,7 @@ cswap config                              # list effective settings ("(default)"
 cswap config get autoswitch.threshold
 cswap config set autoswitch.threshold 80  # validated: rejects out-of-range values loudly
 cswap config set autoswitch.model Fable   # per-model switching (see "auto"); Fable,Opus for several
+cswap config set ui.watchStyle meters     # cswap watch layout: classic bars (default) or vertical meters
 cswap config unset autoswitch.threshold   # back to the default
 cswap config path                         # where settings.json lives
 ```

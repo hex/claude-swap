@@ -15,10 +15,15 @@ from textual.reactive import reactive
 from textual.worker import WorkerState
 
 from claude_swap.models import AccountsSnapshot
-from claude_swap.settings import load_settings
+from claude_swap.settings import load_settings, load_ui_settings
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui.autoview import AutoScreen
-from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
+from claude_swap.tui.dashboard import (
+    ClassicWatchScreen,
+    DashboardScreen,
+    MeterWatchScreen,
+    watch_screen,
+)
 from claude_swap.tui.data import ActionResult, SnapshotSource, run_action
 from claude_swap.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
 from claude_swap.tui.theme import CSWAP_DARK
@@ -58,6 +63,11 @@ class CswapApp(App):
             ).threshold
         except Exception:
             self.threshold_pct = None
+        # cswap watch layout; a bad/missing setting falls back to classic.
+        try:
+            self._watch_style = load_ui_settings(switcher.backup_dir).watch_style
+        except Exception:
+            self._watch_style = "classic"
 
     def on_mount(self) -> None:
         self.register_theme(CSWAP_DARK)
@@ -65,7 +75,7 @@ class CswapApp(App):
         self.push_screen(DashboardScreen())
         if self._start == "watch":
             # Stacked over the dashboard so Esc lands there, not on exit.
-            self.push_screen(WatchScreen())
+            self.push_screen(watch_screen(self._watch_style))
         self.set_interval(self.POLL_INTERVAL_S, self._tick)
         self._tick()
 
@@ -285,6 +295,6 @@ class CswapApp(App):
         self.push_screen(AutoScreen())
 
     def action_open_watch(self) -> None:
-        if isinstance(self.screen, WatchScreen):
+        if isinstance(self.screen, (ClassicWatchScreen, MeterWatchScreen)):
             return
-        self.push_screen(WatchScreen())
+        self.push_screen(watch_screen(self._watch_style))

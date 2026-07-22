@@ -183,9 +183,18 @@ class FakeSwitcher:
         self._poll_inputs_override = None
 
 
-def make_app(fake: FakeSwitcher):
+def set_watch_style(backup_dir: Path, style: str) -> None:
+    """Persist ui.watch_style so the app picks that watch layout at launch."""
+    from claude_swap.settings import set_setting
+
+    set_setting(backup_dir, "ui.watchStyle", style)
+
+
+def make_app(fake: FakeSwitcher, *, watch_style: str | None = None):
     from claude_swap.tui.app import CswapApp
 
+    if watch_style is not None:
+        set_watch_style(fake.backup_dir, watch_style)
     return CswapApp(fake)
 
 
@@ -922,22 +931,24 @@ class TestDashboard:
 
 
 @pytest.mark.asyncio
-class TestWatchScreen:
+class TestMeterWatchScreen:
+    """The opt-in ``ui.watch_style = meters`` vertical-meter grid layout."""
+
     def _fake(self, tmp_path):
         return FakeSwitcher(
             [make_account(1, active=True), make_account(2)], tmp_path
         )
 
     async def test_w_opens_monitor_without_cursor(self, tmp_path):
-        app = make_app(self._fake(tmp_path))
+        app = make_app(self._fake(tmp_path), watch_style="meters")
         async with app.run_test(size=(100, 40)) as pilot:
             await settle(pilot)
             await pilot.press("w")
             await pilot.pause()
-            from claude_swap.tui.dashboard import WatchScreen
+            from claude_swap.tui.dashboard import MeterWatchScreen
             from claude_swap.tui.widgets import MetersGrid
 
-            assert isinstance(app.screen, WatchScreen)
+            assert isinstance(app.screen, MeterWatchScreen)
             grid = app.screen.query_one("#meters", MetersGrid)
             assert grid.cursor is None  # monitor mode: no cursor
             await pilot.press("enter")  # inert while just watching
@@ -945,7 +956,7 @@ class TestWatchScreen:
             assert not any(call[0] == "switch_to" for call in fake_calls(app))
 
     async def test_s_arms_selection_at_active_index(self, tmp_path):
-        app = make_app(self._fake(tmp_path))
+        app = make_app(self._fake(tmp_path), watch_style="meters")
         async with app.run_test(size=(100, 40)) as pilot:
             await settle(pilot)
             await pilot.press("w")
@@ -958,7 +969,7 @@ class TestWatchScreen:
             assert grid.cursor == 0  # armed on the active account
 
     async def test_nav_right_moves_cursor_one(self, tmp_path):
-        app = make_app(self._fake(tmp_path))
+        app = make_app(self._fake(tmp_path), watch_style="meters")
         async with app.run_test(size=(100, 40)) as pilot:
             await settle(pilot)
             await pilot.press("w")
@@ -978,7 +989,7 @@ class TestWatchScreen:
             [make_account(1, active=True), make_account(2), make_account(3)],
             tmp_path,
         )
-        app = make_app(fake)
+        app = make_app(fake, watch_style="meters")
         async with app.run_test(size=(44, 38)) as pilot:
             await settle(pilot)
             await pilot.press("w")
@@ -995,7 +1006,7 @@ class TestWatchScreen:
             [make_account(1, active=True), make_account(2), make_account(3)],
             tmp_path,
         )
-        app = make_app(fake)
+        app = make_app(fake, watch_style="meters")
         async with app.run_test(size=(30, 12)) as pilot:
             await settle(pilot)
             await pilot.press("w")
@@ -1031,7 +1042,7 @@ class TestWatchScreen:
             [make_account(1), make_account(2, active=True), make_account(3)],
             tmp_path,
         )
-        app = make_app(fake)
+        app = make_app(fake, watch_style="meters")
         async with app.run_test(size=(100, 40)) as pilot:
             assert app.snapshot is None  # initial refresh hasn't landed yet
             await pilot.press("w")
@@ -1059,6 +1070,112 @@ class TestWatchScreen:
 
     async def test_s_arms_selection_switch_stays_watching(self, tmp_path):
         fake = self._fake(tmp_path)
+        app = make_app(fake, watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            from claude_swap.tui.dashboard import MeterWatchScreen
+            from claude_swap.tui.widgets import MetersGrid
+
+            await pilot.press("l", "enter")
+            await settle(pilot)
+            assert ("switch_to", "2") in fake.calls
+            assert isinstance(app.screen, MeterWatchScreen)  # stayed watching
+            grid = app.screen.query_one("#meters", MetersGrid)
+            assert grid.cursor is None  # disarmed after switch
+            assert app.snapshot.active_number == "2"
+
+    async def test_escape_disarms_then_leaves(self, tmp_path):
+        fake = self._fake(tmp_path)
+        app = make_app(fake, watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            await pilot.press("escape")  # disarm selection only
+            await pilot.pause()
+            from claude_swap.tui.dashboard import DashboardScreen, MeterWatchScreen
+            from claude_swap.tui.widgets import MetersGrid
+
+            assert isinstance(app.screen, MeterWatchScreen)
+            assert app.screen.query_one("#meters", MetersGrid).cursor is None
+            await pilot.press("escape")  # now leave
+            await pilot.pause()
+            assert isinstance(app.screen, DashboardScreen)
+            assert not any(call[0] == "switch_to" for call in fake.calls)
+
+    async def test_menu_watch_entry_opens_it(self, tmp_path):
+        app = make_app(self._fake(tmp_path), watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "watch")
+            from claude_swap.tui.dashboard import MeterWatchScreen
+
+            assert isinstance(app.screen, MeterWatchScreen)
+
+    async def test_app_start_watch_stacks_over_dashboard(self, tmp_path):
+        from claude_swap.tui.app import CswapApp
+
+        fake = self._fake(tmp_path)
+        set_watch_style(fake.backup_dir, "meters")
+        app = CswapApp(fake, start="watch")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            from claude_swap.tui.dashboard import DashboardScreen, MeterWatchScreen
+
+            assert isinstance(app.screen, MeterWatchScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, DashboardScreen)
+
+
+@pytest.mark.asyncio
+class TestClassicWatchScreen:
+    """The default horizontal-bar account-list watch layout (``classic``)."""
+
+    def _fake(self, tmp_path):
+        return FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+
+    async def test_w_opens_monitor_without_cursor(self, tmp_path):
+        # No ui.watch_style set → default classic.
+        app = make_app(self._fake(tmp_path))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            from textual.widgets import ListView
+
+            from claude_swap.tui.dashboard import ClassicWatchScreen
+
+            assert isinstance(app.screen, ClassicWatchScreen)
+            listview = app.screen.query_one("#accounts", ListView)
+            assert listview.index is None  # monitor mode: no cursor
+            await pilot.press("enter")  # inert while just watching
+            await settle(pilot)
+            assert not any(call[0] == "switch_to" for call in fake_calls(app))
+
+    async def test_s_arms_selection_at_active_index(self, tmp_path):
+        app = make_app(self._fake(tmp_path))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            from textual.widgets import ListView
+
+            listview = app.screen.query_one("#accounts", ListView)
+            assert listview.index == 0  # armed on the active account
+
+    async def test_s_arms_selection_switch_stays_watching(self, tmp_path):
+        fake = self._fake(tmp_path)
         app = make_app(fake)
         async with app.run_test(size=(100, 40)) as pilot:
             await settle(pilot)
@@ -1066,15 +1183,16 @@ class TestWatchScreen:
             await pilot.pause()
             await pilot.press("s")
             await pilot.pause()
-            from claude_swap.tui.dashboard import WatchScreen
-            from claude_swap.tui.widgets import MetersGrid
-
-            await pilot.press("l", "enter")
+            await pilot.press("down", "enter")  # move to account 2, confirm
             await settle(pilot)
+            from textual.widgets import ListView
+
+            from claude_swap.tui.dashboard import ClassicWatchScreen
+
             assert ("switch_to", "2") in fake.calls
-            assert isinstance(app.screen, WatchScreen)  # stayed watching
-            grid = app.screen.query_one("#meters", MetersGrid)
-            assert grid.cursor is None  # disarmed after switch
+            assert isinstance(app.screen, ClassicWatchScreen)  # stayed watching
+            listview = app.screen.query_one("#accounts", ListView)
+            assert listview.index is None  # disarmed after switch
             assert app.snapshot.active_number == "2"
 
     async def test_escape_disarms_then_leaves(self, tmp_path):
@@ -1088,11 +1206,12 @@ class TestWatchScreen:
             await pilot.pause()
             await pilot.press("escape")  # disarm selection only
             await pilot.pause()
-            from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
-            from claude_swap.tui.widgets import MetersGrid
+            from textual.widgets import ListView
 
-            assert isinstance(app.screen, WatchScreen)
-            assert app.screen.query_one("#meters", MetersGrid).cursor is None
+            from claude_swap.tui.dashboard import ClassicWatchScreen, DashboardScreen
+
+            assert isinstance(app.screen, ClassicWatchScreen)
+            assert app.screen.query_one("#accounts", ListView).index is None
             await pilot.press("escape")  # now leave
             await pilot.pause()
             assert isinstance(app.screen, DashboardScreen)
@@ -1103,9 +1222,9 @@ class TestWatchScreen:
         async with app.run_test(size=(100, 40)) as pilot:
             await settle(pilot)
             await menu_select(pilot, "watch")
-            from claude_swap.tui.dashboard import WatchScreen
+            from claude_swap.tui.dashboard import ClassicWatchScreen
 
-            assert isinstance(app.screen, WatchScreen)
+            assert isinstance(app.screen, ClassicWatchScreen)
 
     async def test_app_start_watch_stacks_over_dashboard(self, tmp_path):
         from claude_swap.tui.app import CswapApp
@@ -1113,12 +1232,55 @@ class TestWatchScreen:
         app = CswapApp(self._fake(tmp_path), start="watch")
         async with app.run_test(size=(100, 40)) as pilot:
             await settle(pilot)
-            from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
+            from claude_swap.tui.dashboard import ClassicWatchScreen, DashboardScreen
 
-            assert isinstance(app.screen, WatchScreen)
+            assert isinstance(app.screen, ClassicWatchScreen)
             await pilot.press("escape")
             await pilot.pause()
             assert isinstance(app.screen, DashboardScreen)
+
+
+def test_watch_screen_factory_maps_styles():
+    from claude_swap.tui.dashboard import (
+        ClassicWatchScreen,
+        MeterWatchScreen,
+        watch_screen,
+    )
+
+    assert isinstance(watch_screen("classic"), ClassicWatchScreen)
+    assert isinstance(watch_screen("meters"), MeterWatchScreen)
+    # An unexpected value falls back to the classic default.
+    assert isinstance(watch_screen("hologram"), ClassicWatchScreen)
+
+
+@pytest.mark.asyncio
+class TestWatchStyle:
+    """ui.watch_style selects which watch layout the launcher opens."""
+
+    def _fake(self, tmp_path):
+        return FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+
+    async def test_unset_setting_opens_classic(self, tmp_path):
+        app = make_app(self._fake(tmp_path))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            from claude_swap.tui.dashboard import ClassicWatchScreen
+
+            assert isinstance(app.screen, ClassicWatchScreen)
+
+    async def test_meters_setting_opens_meters(self, tmp_path):
+        app = make_app(self._fake(tmp_path), watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            from claude_swap.tui.dashboard import MeterWatchScreen
+
+            assert isinstance(app.screen, MeterWatchScreen)
 
 
 def fake_calls(app) -> list[tuple]:

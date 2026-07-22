@@ -6,10 +6,11 @@ account-targeted opens a context of its own:
 
 - ``s`` / menu "Switch account" → :class:`SwitchScreen` — every account
   full-size, Enter switches, pops back.
-- ``w`` / menu "Watch accounts" / ``cswap watch`` → :class:`WatchScreen` —
-  the same full cards but read-only: a live monitor. ``s`` arms selection
-  (cursor appears on the active account), Enter switches and *stays
-  watching*, Esc disarms.
+- ``w`` / menu "Watch accounts" / ``cswap watch`` → a watch screen chosen by
+  ``ui.watch_style``: :class:`ClassicWatchScreen` (default) shows the same
+  full cards read-only, :class:`MeterWatchScreen` a vertical gradient-meter
+  grid. ``s`` arms selection (cursor appears on the active account), Enter
+  switches and *stays watching*, Esc disarms.
 - "Remove account" nests into a submenu listing the accounts.
 
 No global command palette: actions live where their context is.
@@ -202,8 +203,9 @@ class DashboardScreen(Screen):
 class AccountListScreen(Screen):
     """Shared machinery: a live ListView of full account cards.
 
-    :class:`SwitchScreen` is the sole subclass — arrows pick, Enter
-    switches.
+    Subclasses decide what the cursor does — :class:`SwitchScreen` is
+    selection-first, :class:`ClassicWatchScreen` is a monitor that can arm
+    selection on demand.
     """
 
     app: "CswapApp"
@@ -306,12 +308,13 @@ class SwitchScreen(AccountListScreen):
         self.app.pop_screen()
 
 
-class WatchScreen(Screen):
-    """Live monitor of every account, full detail, hands-off by default.
+class MeterWatchScreen(Screen):
+    """Live monitor as a vertical gradient-meter grid, hands-off by default.
 
     ``s`` arms selection (cursor appears on the active account); Enter then
     switches and stays here — you keep watching on the new account. Esc
-    disarms selection first, then leaves the screen.
+    disarms selection first, then leaves the screen. Opt in via
+    ``ui.watch_style = meters``.
     """
 
     app: "CswapApp"
@@ -393,3 +396,108 @@ class WatchScreen(Screen):
     def action_nav_down(self) -> None:
         if self._selecting:
             self.query_one("#meters", MetersGrid).move_cursor(0, 1)
+
+
+class ClassicWatchScreen(AccountListScreen):
+    """Live monitor of every account as full horizontal-bar cards, hands-off
+    by default.
+
+    ``s`` arms selection (cursor appears on the active account); Enter then
+    switches and stays here — you keep watching on the new account. Esc
+    disarms selection first, then leaves the screen. This is the default
+    ``cswap watch`` layout (``ui.watch_style = classic``).
+    """
+
+    _WATCH_TITLE = "watching all accounts"
+    _SELECT_TITLE = "switch to which account? · enter confirm · esc cancel"
+
+    BINDINGS = [
+        Binding("s", "toggle_select", "Switch"),
+        Binding("enter", "select_highlighted", "Confirm", priority=True),
+        Binding("f", "app.refresh_full", "Refresh", show=False),
+        Binding("escape,q", "back", "Back"),
+        Binding("down,j", "nav_down", show=False),
+        Binding("up,k", "nav_up", show=False),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._selecting = False
+
+    def on_mount(self) -> None:
+        self.query_one("#list-title", Static).update(self._WATCH_TITLE)
+        super().on_mount()
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "select_highlighted" and not self._selecting:
+            return False  # hidden and inert until selection is armed
+        return True
+
+    def _index_after_build(
+        self, snap: AccountsSnapshot, first_build: bool, previous: int | None
+    ) -> int | None:
+        if not self._selecting:
+            return None  # monitor mode: no cursor at all
+        return super()._index_after_build(snap, first_build, previous)
+
+    def _set_selecting(self, on: bool) -> None:
+        self._selecting = on
+        listview = self.query_one("#accounts", ListView)
+        title = self.query_one("#list-title", Static)
+        if on:
+            snap = self.app.snapshot
+            if snap is not None and snap.accounts:
+                listview.index = _active_index(snap)
+            listview.focus()
+            title.update(self._SELECT_TITLE)
+        else:
+            listview.index = None
+            self.set_focus(None)
+            title.update(self._WATCH_TITLE)
+        self.refresh_bindings()
+
+    def action_toggle_select(self) -> None:
+        self._set_selecting(not self._selecting)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if not self._selecting:
+            return  # e.g. a stray click while just watching
+        item = event.item
+        if isinstance(item, AccountItem):
+            self.app.do_switch(item.number)
+            self._set_selecting(False)  # stay here, keep watching
+
+    def action_select_highlighted(self) -> None:
+        if self._selecting:
+            self.query_one("#accounts", ListView).action_select_cursor()
+
+    def action_back(self) -> None:
+        if self._selecting:
+            self._set_selecting(False)
+        else:
+            self.app.pop_screen()
+
+    def action_nav_down(self) -> None:
+        listview = self.query_one("#accounts", ListView)
+        if self._selecting:
+            listview.action_cursor_down()
+        else:
+            listview.scroll_down(animate=False)
+
+    def action_nav_up(self) -> None:
+        listview = self.query_one("#accounts", ListView)
+        if self._selecting:
+            listview.action_cursor_up()
+        else:
+            listview.scroll_up(animate=False)
+
+
+def watch_screen(watch_style: str) -> Screen:
+    """The ``cswap watch`` screen for a ``ui.watch_style`` value.
+
+    ``meters`` opts into the vertical gradient-meter grid; anything else
+    (the default ``classic``) gets the horizontal-bar account list.
+    """
+    if watch_style == "meters":
+        return MeterWatchScreen()
+    return ClassicWatchScreen()
