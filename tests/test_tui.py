@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_swap.autoswitch import NoSwitchEvent, SwitchEvent
+from claude_swap.autoswitch import NoSwitchEvent, PollEvent, SwitchEvent
 from claude_swap.json_output import USAGE_API_KEY, USAGE_TOKEN_EXPIRED
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -1360,6 +1360,249 @@ class TestMeterWatchScreen:
 
 
 @pytest.mark.asyncio
+class TestMeterWatchAutoSwitch:
+    """``a`` runs a dry-run auto-switch engine from the meters view so the
+    grid can highlight the predicted next target; ``L`` arms real switching."""
+
+    def _fake(self, tmp_path):
+        return FakeSwitcher(
+            [make_account(1, active=True), make_account(2, alias="peer")], tmp_path
+        )
+
+    async def _open(self, app, pilot):
+        await settle(pilot)
+        await pilot.press("w")
+        await pilot.pause()
+        from claude_swap.tui.widgets import MetersGrid
+
+        return app.screen.query_one("#meters", MetersGrid)
+
+    async def _emit(self, pilot, engine, event) -> None:
+        """Deliver ``event`` the way the real engine does: from a worker
+        thread, so ``call_from_thread`` hands it to the app loop."""
+        await asyncio.to_thread(engine.on_event, event)
+        await pilot.pause()
+
+    async def test_a_toggles_a_dry_run_engine_and_store_only(
+        self, tmp_path, fake_engine
+    ):
+        app = make_app(self._fake(tmp_path), watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(app, pilot)
+            assert fake_engine.instances == []  # off until asked
+            assert app._store_only is False
+
+            await pilot.press("a")
+            await pilot.pause()
+            assert len(fake_engine.instances) == 1
+            assert fake_engine.instances[0].dry_run is True
+            assert app._store_only is True
+
+            await pilot.press("a")
+            await pilot.pause()
+            assert fake_engine.instances[0].stopped is True
+            assert len(fake_engine.instances) == 1
+            assert app._store_only is False
+
+
+    async def test_poll_events_drive_the_predicted_highlight_and_title(
+        self, tmp_path, fake_engine
+    ):
+        app = make_app(self._fake(tmp_path), watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            grid = await self._open(app, pilot)
+            from textual.widgets import Static
+
+            title = app.screen.query_one("#list-title", Static)
+            readout = app.screen.query_one("#auto-readout", Static)
+            assert readout.display is False  # nothing to say while auto is off
+            await pilot.press("a")
+            await pilot.pause()
+            engine = fake_engine.instances[0]
+
+            await self._emit(pilot, engine, PollEvent(
+                active={"number": 1, "email": "a@example.com"},
+                headroom={"1": 40.0, "2": 90.0},
+                threshold=90.0,
+                next_target="2",
+            ))
+            assert grid.predicted == "2"
+            assert grid.urgency == pytest.approx(0.0)  # 30 points of margin
+            # The readout lives in the footer, so the meters keep every row.
+            assert title.display is False
+            assert readout.display is True
+            assert str(readout.render()) == "dry-run · next → peer"
+
+            await self._emit(pilot, engine, PollEvent(
+                active={"number": 1, "email": "a@example.com"},
+                headroom={"1": 12.0, "2": 90.0},
+                threshold=90.0,
+                next_target="2",
+            ))
+            assert grid.urgency == pytest.approx(0.9)  # 2 points of margin
+
+            await self._emit(pilot, engine, PollEvent(
+                active={"number": 1, "email": "a@example.com"},
+                headroom={"1": 12.0, "2": 0.0},
+                threshold=90.0,
+            ))
+            assert grid.predicted is None
+            assert str(readout.render()) == "dry-run · next → none"
+
+            await pilot.press("a")  # off: highlight and readout both go
+            await pilot.pause()
+            assert grid.predicted is None
+            assert readout.display is False
+            assert title.display is False
+
+
+    async def test_L_confirms_before_going_live_and_returns_to_dry_run(
+        self, tmp_path, fake_engine
+    ):
+        app = make_app(self._fake(tmp_path), watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(app, pilot)
+            from textual.widgets import Static
+            from claude_swap.tui.modals import ConfirmModal
+
+            readout = app.screen.query_one("#auto-readout", Static)
+            await pilot.press("L")  # inert while auto is off
+            await pilot.pause()
+            assert fake_engine.instances == []
+            assert not isinstance(app.screen, ConfirmModal)
+
+            await pilot.press("a")
+            await pilot.pause()
+            await pilot.press("L")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmModal)
+            await pilot.press("n")  # declined: still dry-run
+            await pilot.pause()
+            assert len(fake_engine.instances) == 1
+            assert fake_engine.instances[0].stopped is False
+
+            await pilot.press("L")
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause()
+            assert fake_engine.instances[0].stopped is True
+            assert len(fake_engine.instances) == 2
+            assert fake_engine.instances[1].dry_run is False
+            assert app._store_only is True
+            assert str(readout.render()).startswith("LIVE")
+
+            await pilot.press("L")  # back to dry-run needs no confirmation
+            await pilot.pause()
+            assert fake_engine.instances[1].stopped is True
+            assert fake_engine.instances[2].dry_run is True
+            assert str(readout.render()).startswith("dry-run")
+
+    async def test_a_live_switch_sweeps_the_frames_and_refreshes(
+        self, tmp_path, fake_engine
+    ):
+        app = make_app(self._fake(tmp_path), watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            grid = await self._open(app, pilot)
+            await pilot.press("a")
+            await pilot.pause()
+            engine = fake_engine.instances[0]
+            await settle(pilot)
+            snapshots_before = len(app.switcher.fetch_sets)
+
+            def switch(dry_run):
+                return SwitchEvent(
+                    trigger="proactive",
+                    from_ref={"number": 1, "email": "a@example.com"},
+                    to_ref={"number": 2, "email": "b@example.com"},
+                    dry_run=dry_run,
+                )
+
+            await self._emit(pilot, engine, PollEvent(
+                active={"number": 1, "email": "a@example.com"},
+                headroom={"1": 5.0, "2": 80.0},
+                threshold=90.0,
+                next_target="2",
+            ))
+            assert grid.predicted == "2"
+
+            await self._emit(pilot, engine, switch(dry_run=True))
+            assert grid._sweep is None  # a would-switch is not a handoff
+            assert grid.predicted == "2"
+
+            await self._emit(pilot, engine, switch(dry_run=False))
+            assert grid._sweep is not None
+            assert grid._sweep[:2] == ("1", "2")
+            # The landed account is active now, not "next": the prediction is
+            # dropped until the engine re-ranks from the new vantage point.
+            assert grid.predicted is None
+            assert grid._anim is not None  # the sweep alone keeps frames coming
+            await settle(pilot)
+            assert len(app.switcher.fetch_sets) > snapshots_before  # cards re-read the store
+
+    async def test_footer_offers_live_only_while_auto_runs(
+        self, tmp_path, fake_engine
+    ):
+        app = make_app(self._fake(tmp_path), watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(app, pilot)
+            assert "L" not in app.screen.active_bindings
+            await pilot.press("a")
+            await pilot.pause()
+            assert "L" in app.screen.active_bindings
+            await pilot.press("a")
+            await pilot.pause()
+            assert "L" not in app.screen.active_bindings
+
+    async def test_stopping_auto_unpins_the_poll_policy(self, tmp_path, fake_engine):
+        app = make_app(self._fake(tmp_path), watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(app, pilot)
+            app.switcher._poll_inputs_override = (90.0, ())  # as the engine pins it
+            await pilot.press("a")
+            await pilot.pause()
+            await pilot.press("a")
+            await pilot.pause()
+            assert app.switcher._poll_inputs_override is None
+
+    async def test_events_from_a_replaced_engine_are_ignored(
+        self, tmp_path, fake_engine
+    ):
+        app = make_app(self._fake(tmp_path), watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            grid = await self._open(app, pilot)
+            await pilot.press("a")
+            await pilot.pause()
+            old = fake_engine.instances[0]
+            await pilot.press("L")
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause()
+            assert old.stopped
+            # The old worker may still finish a tick after being replaced.
+            await self._emit(pilot, old, PollEvent(
+                active={"number": 1, "email": "a@example.com"},
+                headroom={"1": 40.0, "2": 90.0},
+                threshold=90.0,
+                next_target="2",
+            ))
+            assert grid.predicted is None
+
+    async def test_layout_swap_stops_the_engine(self, tmp_path, fake_engine):
+        app = make_app(self._fake(tmp_path), watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(app, pilot)
+            await pilot.press("a")
+            await pilot.pause()
+            await pilot.press("ctrl+v")
+            await pilot.pause()
+            from claude_swap.tui.dashboard import ClassicWatchScreen
+
+            assert isinstance(app.screen, ClassicWatchScreen)
+            assert fake_engine.instances[0].stopped is True
+            assert app._store_only is False
+
+
+@pytest.mark.asyncio
 class TestClassicWatchScreen:
     """The default horizontal-bar account-list watch layout (``classic``)."""
 
@@ -1713,6 +1956,9 @@ def fake_engine(monkeypatch):
     _FakeEngine.instances = []
     monkeypatch.setattr(
         "claude_swap.tui.autoview.AutoSwitchEngine", _FakeEngine
+    )
+    monkeypatch.setattr(
+        "claude_swap.tui.dashboard.AutoSwitchEngine", _FakeEngine
     )
     return _FakeEngine
 
@@ -2671,6 +2917,31 @@ def test_meter_card_flash_highlights_top_border():
     )
 
 
+def test_meter_card_frame_style_overrides_the_border_only():
+    from claude_swap.tui.widgets import meter_card
+    from claude_swap.tui.theme import Palette
+
+    acc = make_account(2, email="peer@example.com", entry=make_entry(pct5=40.0))
+    now = time.time()
+    plain = meter_card(acc, 21, 5, now=now)
+    styled = meter_card(acc, 21, 5, now=now, frame_style="#ff00ff")
+
+    assert styled.plain == plain.plain  # never changes layout or text
+    lines = styled.plain.split("\n")
+    # Every line's left and right border cell carries the override; the
+    # muted default is gone from the frame entirely.
+    from rich.console import Console
+
+    console = Console()
+    offset = 0
+    for ln in lines:
+        for pos in (offset, offset + len(ln) - 1):
+            assert styled.get_style_at_offset(console, pos).color.triplet.hex == "#ff00ff"
+        offset += len(ln) + 1
+    muted = Palette.DARK.muted.lstrip("#")
+    assert plain.get_style_at_offset(console, 0).color.triplet.hex == f"#{muted}"
+
+
 def test_meters_grid_text_flash_marks_only_flashed_account():
     from claude_swap.tui.theme import ACCENT
     from claude_swap.tui.widgets import meters_grid_text
@@ -2686,6 +2957,36 @@ def test_meters_grid_text_flash_marks_only_flashed_account():
     )
     assert flashed_out.plain == plain_out.plain  # flash never changes layout/text
     assert len([sp for sp in flashed_out.spans if sp.style == flash_style]) == 1
+
+
+def test_meters_grid_text_frame_styles_mark_only_named_accounts():
+    from rich.console import Console
+    from claude_swap.tui.widgets import meters_grid_text
+
+    accounts = _make_three_meter_accounts()
+    console = Console()
+    plain_out = meters_grid_text(accounts, 44, 31, now=time.time())
+    styled_out = meters_grid_text(
+        accounts, 44, 31, now=time.time(),
+        frame_styles={accounts[1].number: "#ff00ff"},
+    )
+    assert styled_out.plain == plain_out.plain
+
+    def border_colours(text, line_idx, card_idx):
+        # Cards are 21 wide with a one-space gutter: left border at col 0/22,
+        # right border at col 20/42.
+        line_start = sum(len(ln) + 1 for ln in text.plain.split("\n")[:line_idx])
+        left = line_start + card_idx * 22
+        right = left + 20
+        return {
+            text.get_style_at_offset(console, pos).color.triplet.hex
+            for pos in (left, right)
+        }
+
+    for line_idx in range(3):
+        assert border_colours(styled_out, line_idx, 1) == {"#ff00ff"}
+        assert border_colours(styled_out, line_idx, 0) == border_colours(plain_out, line_idx, 0)
+    assert "#ff00ff" not in {sp.style for sp in plain_out.spans}
 
 
 def test_fit_center_truncates_oversized_content():
@@ -2820,6 +3121,123 @@ def _snap_with_fetched_at(fetched_at: float) -> AccountsSnapshot:
         accounts=(make_account(1, active=True, entry=entry),),
         taken_at=time.time(),
     )
+
+
+class _FakeTimer:
+    def __init__(self):
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+
+def _animatable_grid():
+    """A MetersGrid outside an app, with scheduling and repaint stubbed."""
+    from claude_swap.tui.widgets import MetersGrid
+
+    grid = MetersGrid()
+    grid.set_timer = lambda *a, **k: None
+    grid.refresh = lambda *a, **k: None
+    grid.intervals: list[tuple[float, object]] = []
+
+    def set_interval(period, callback, **_k):
+        timer = _FakeTimer()
+        grid.intervals.append((period, timer))
+        return timer
+
+    grid.set_interval = set_interval
+    return grid
+
+
+def test_meters_grid_animates_only_while_a_target_is_predicted():
+    grid = _animatable_grid()
+    assert grid.intervals == []  # idle: nothing scheduled, flat CPU
+
+    grid.set_predicted("2", 0.0)
+    assert grid.predicted == "2"
+    assert len(grid.intervals) == 1 and not grid.intervals[0][1].stopped
+
+    grid.set_predicted("3", 0.5)  # retarget reuses the running interval
+    assert len(grid.intervals) == 1
+
+    grid.set_predicted(None, 0.0)
+    assert grid.predicted is None
+    assert grid.intervals[0][1].stopped
+
+
+def test_predicted_card_frame_breathes_between_muted_and_accent():
+    from claude_swap.tui.theme import Palette
+    from claude_swap.tui.widgets import _interp
+
+    palette = Palette.DARK
+    grid = _animatable_grid()
+    assert grid.frame_styles(palette, now=0.0) == {}  # nothing predicted
+
+    grid.set_predicted("2", 0.0)
+    at_rest = grid.frame_styles(palette, now=0.0)
+    assert set(at_rest) == {"2"}
+    assert at_rest["2"] == palette.muted  # phase 0: starts from the resting frame
+
+    for _ in range(10):  # half a slow period (2.0s at 0.1s frames)
+        grid._advance_frame()
+    at_peak = grid.frame_styles(palette, now=0.0)["2"]
+    assert at_peak == palette.accent  # phase pi: fully lit
+    assert _interp(((0.0, palette.muted), (1.0, palette.accent)), 0.5) not in (
+        palette.muted, palette.accent
+    )  # the ramp really passes through intermediate colours
+
+    for _ in range(10):
+        grid._advance_frame()
+    assert grid.frame_styles(palette, now=0.0)["2"] == palette.muted  # back down
+
+
+def test_handoff_sweep_fades_old_active_out_and_new_active_in():
+    from claude_swap.tui.theme import Palette
+    from claude_swap.tui.widgets import _ACTIVE_GREEN, _SWEEP_S
+
+    palette = Palette.DARK
+    grid = _animatable_grid()
+    grid.start_sweep("1", "2", now=100.0)
+    assert len(grid.intervals) == 1  # the sweep alone keeps frames coming
+
+    # Weight follows the active role at once; only the colour crosses over.
+    start = grid.frame_styles(palette, now=100.0)
+    assert start["1"] == _ACTIVE_GREEN  # old active: still green, no longer bold
+    assert start["2"] == f"{palette.muted} bold"  # new active: bold, still muted
+
+    end = grid.frame_styles(palette, now=100.0 + _SWEEP_S)
+    assert end["1"] == palette.muted
+    assert end["2"] == f"{_ACTIVE_GREEN} bold"
+
+    grid._advance_frame(now=100.0 + _SWEEP_S + 0.1)  # sweep over: back to idle
+    assert grid.frame_styles(palette, now=200.0) == {}
+    assert grid.intervals[0][1].stopped
+
+
+def test_urgency_speeds_up_the_breathing():
+    grid = _animatable_grid()
+    grid.set_predicted("2", 0.0)
+    grid._advance_frame()
+    slow_step = grid._phase
+
+    grid.set_predicted("3", 1.0)  # retarget resets the phase
+    assert grid._phase == 0.0
+    grid._advance_frame()
+    assert grid._phase > slow_step * 3  # 0.6s period vs 2.0s: >3x faster
+
+
+def test_compact_fallback_does_not_animate():
+    """The compact one-line-per-account view has no frames to breathe, so a
+    prediction must not keep the 10 Hz interval running there."""
+    grid = _animatable_grid()
+    grid.set_predicted("2", 0.0)
+    assert len(grid.intervals) == 1 and not grid.intervals[0][1].stopped
+
+    grid.set_compact(True)
+    assert grid.intervals[0][1].stopped  # nothing to paint: interval off
+
+    grid.set_compact(False)
+    assert len(grid.intervals) == 2 and not grid.intervals[1][1].stopped
 
 
 def test_meters_grid_flash_extends_on_reflash():

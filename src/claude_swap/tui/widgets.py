@@ -8,12 +8,14 @@ auto-switch trigger line), and stale-measurement dimming.
 
 from __future__ import annotations
 
+import math
 import textwrap
 import time
 from functools import partial
 from typing import TYPE_CHECKING
 
 from rich.text import Text
+from textual.timer import Timer
 from textual.widgets import ListItem, Static
 
 from claude_swap import pace
@@ -33,6 +35,15 @@ _BAR_EMPTY = "─"
 _BAR_TICK = "┃"
 
 _FLASH_S = 1.5  # how long a just-refreshed card's border stays highlighted
+
+# Meter-grid animation, driven by one interval that runs only while there is
+# something to animate. The predicted next-switch target's frame "breathes"
+# between muted and accent; the period shrinks as the active account nears
+# the threshold.
+_ANIM_DT = 0.1  # seconds between animation frames
+_BREATHE_SLOW_S = 2.0  # breathing period when a switch is far off
+_BREATHE_FAST_S = 0.6  # breathing period when a switch is imminent
+_SWEEP_S = 1.0  # handoff sweep: old active fades to muted, new one to green
 
 _ACTIVE_GREEN = "#3fb950"  # bright green frame/title for the active account's card
 
@@ -440,18 +451,20 @@ def meter_card(
     now: float,
     flash: bool = False,
     palette: Palette = Palette.DARK,
+    frame_style: str | None = None,
 ) -> Text:
     """A framed vertical-meter card: header, one bar column per window, and
     baseline/label/percent/reset rows beneath. Always ``bar_height +
     CARD_CHROME`` lines of exactly ``card_width`` columns — used by the
     watch screen's meter grid. ``flash`` highlights the top border to signal
-    a just-refreshed measurement."""
+    a just-refreshed measurement; ``frame_style`` replaces the frame's
+    colour (animations: the predicted next target, a switch handoff)."""
     interior_width = card_width - 2
     # An active account's card wears a bold bright-green double-line frame;
     # the rest wear the thin muted single-line one.
     active = acc.is_active
     frame_glyphs = _FRAME_GLYPHS[active]
-    frame = f"{_ACTIVE_GREEN} bold" if active else palette.muted
+    frame = frame_style or (f"{_ACTIVE_GREEN} bold" if active else palette.muted)
     side = frame_glyphs["v"]
     bottom_border = (
         frame_glyphs["bl"] + frame_glyphs["h"] * (card_width - 2) + frame_glyphs["br"]
@@ -677,12 +690,14 @@ def meters_grid_text(
     now: float,
     flashed: set[str] | None = None,
     palette: Palette = Palette.DARK,
+    frame_styles: dict[str, str] | None = None,
 ) -> Text:
     """The watch screen's tiled meter grid: every account as a
     :func:`meter_card`, ``ncols`` per row with a one-space gutter, rows
     separated by a blank line. ``cursor`` marks that account's card as
     selected; ``flashed`` account numbers get their card's top border
-    highlighted.
+    highlighted; ``frame_styles`` (account number → style) recolours those
+    cards' frames — cards only, the compact fallback ignores it.
 
     When even minimum-height cards can't fit ``height`` (tiny terminals or
     many accounts), falls back to a compact one-line-per-account view — see
@@ -692,6 +707,7 @@ def meters_grid_text(
         return Text("no accounts", style=palette.muted)
 
     flashed = flashed or set()
+    frame_styles = frame_styles or {}
     ncols, card_width, bar_height = meter_grid_dims(width, height, len(accounts))
     if not _cards_fit(ncols, bar_height, height, len(accounts)):
         return _compact_fallback_text(
@@ -701,6 +717,7 @@ def meters_grid_text(
         meter_card(
             acc, card_width, bar_height, now=now,
             flash=acc.number in flashed, palette=palette,
+            frame_style=frame_styles.get(acc.number),
         )
         for acc in accounts
     ]
@@ -941,6 +958,80 @@ class MetersGrid(Static):
         self._stamps: dict[str, float | None] = {}
         self._flash: set[str] = set()
         self._flash_gen: dict[str, int] = {}
+        self.predicted: str | None = None  # account number the engine would move to
+        self.urgency: float = 0.0  # 0 = far from the threshold … 1 = imminent
+        self._phase: float = 0.0  # breathing phase, radians
+        self._anim: Timer | None = None
+        self._compact = False  # compact fallback in use: no frames to animate
+        # (account left, account switched to, started at) while a real switch
+        # is being swept across the cards; a newer switch simply replaces it.
+        self._sweep: tuple[str | None, str, float] | None = None
+
+    def set_predicted(self, number: str | None, urgency: float) -> None:
+        """Highlight ``number`` as the predicted next-switch target (``None``
+        clears it); ``urgency`` in 0..1 sets the breathing tempo."""
+        changed = number != self.predicted
+        self.predicted = number
+        self.urgency = max(0.0, min(1.0, urgency))
+        if changed:
+            self._phase = 0.0
+        self._sync_animation()
+        if changed:
+            self.refresh(layout=True)
+
+    def start_sweep(
+        self, from_number: str | None, to_number: str, *, now: float | None = None
+    ) -> None:
+        """Animate a real switch: the old active card's frame fades from green
+        to muted while the new active card's frame rises to green."""
+        self._sweep = (from_number, to_number, time.time() if now is None else now)
+        self._sync_animation()
+        self.refresh(layout=True)
+
+    def set_compact(self, compact: bool) -> None:
+        if compact != self._compact:
+            self._compact = compact
+            self._sync_animation()
+
+    def _sync_animation(self) -> None:
+        """Run the frame interval only while something is animating."""
+        want = not self._compact and (
+            self.predicted is not None or self._sweep is not None
+        )
+        if want and self._anim is None:
+            self._anim = self.set_interval(_ANIM_DT, self._advance_frame)
+        elif not want and self._anim is not None:
+            self._anim.stop()
+            self._anim = None
+
+    def _advance_frame(self, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        period = _BREATHE_SLOW_S - (_BREATHE_SLOW_S - _BREATHE_FAST_S) * self.urgency
+        self._phase = (self._phase + math.tau * _ANIM_DT / period) % math.tau
+        if self._sweep is not None and now - self._sweep[2] >= _SWEEP_S:
+            self._sweep = None
+            self._sync_animation()
+        self.refresh()
+
+    def frame_styles(self, palette: Palette, now: float) -> dict[str, str]:
+        """Per-account frame colours for this frame: the predicted target
+        breathes from the resting muted frame up to the accent and back; a
+        handoff sweep in flight overrides the two cards it moves between."""
+        styles: dict[str, str] = {}
+        if self.predicted is not None:
+            lit = 0.5 - 0.5 * math.cos(self._phase)
+            styles[self.predicted] = _interp(
+                ((0.0, palette.muted), (1.0, palette.accent)), lit
+            )
+        if self._sweep is not None:
+            left, landed, started = self._sweep
+            t = (now - started) / _SWEEP_S
+            if left is not None:
+                styles[left] = _interp(((0.0, _ACTIVE_GREEN), (1.0, palette.muted)), t)
+            styles[landed] = (
+                _interp(((0.0, palette.muted), (1.0, _ACTIVE_GREEN)), t) + " bold"
+            )
+        return styles
 
     def on_mount(self) -> None:
         self.watch(self.app, "snapshot", self._on_snapshot)
@@ -1016,14 +1107,22 @@ class MetersGrid(Static):
             return Text("loading…", style=palette.muted)
         if not snap.accounts:
             return Text("No managed accounts yet.", style=palette.muted)
+        now = time.time()
+        ncols, _card_width, bar_height = meter_grid_dims(
+            self.size.width, self.size.height, len(snap.accounts)
+        )
+        self.set_compact(
+            not _cards_fit(ncols, bar_height, self.size.height, len(snap.accounts))
+        )
         return meters_grid_text(
             snap.accounts,
             self.size.width,
             self.size.height,
             cursor=self.cursor,
-            now=time.time(),
+            now=now,
             flashed=self._flash,
             palette=palette,
+            frame_styles=self.frame_styles(palette, now),
         )
 
     def _ncols(self) -> int:

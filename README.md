@@ -166,7 +166,7 @@ Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usag
 
 <img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
-The watch monitor defaults to the horizontal usage-bar cards above. For a compact, glanceable view — a responsive grid of vertical gradient meters — press **`Ctrl+V`** inside the watch screen to flip between the two live, or set the default up front with `cswap config set ui.watchStyle meters` (classic | meters).
+The watch monitor defaults to the horizontal usage-bar cards above. For a compact, glanceable view — a responsive grid of vertical gradient meters — press **`Ctrl+V`** inside the watch screen to flip between the two live, or set the default up front with `cswap config set ui.watchStyle meters` (classic | meters). In the meters view, **`a`** runs the auto-switcher in dry-run so the card it would move to next breathes (faster as the threshold nears), and **`L`** arms real switching after a confirmation; the mode and the next target read out at the right end of the footer.
 
 
 ### Refresh expired tokens
