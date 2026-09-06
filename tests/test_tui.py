@@ -1177,6 +1177,99 @@ class TestMeterWatchScreen:
             await pilot.pause()
             assert grid.cursor == 1
 
+    async def test_grid_mounts_one_card_per_account_at_the_reference_cells(
+        self, tmp_path, monkeypatch
+    ):
+        """The grid is a container of MeterCard widgets, one per account, laid
+        out exactly where ``meters_grid_text`` paints each card, so a frame
+        can repaint one card without touching the rest."""
+        from claude_swap.tui import widgets
+        from claude_swap.tui.theme import Palette
+        from claude_swap.tui.widgets import (
+            MeterCard, MetersGrid, meter_grid_dims, meters_grid_text,
+        )
+
+        monkeypatch.setattr(widgets.time, "time", lambda: 1_000.0)
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2), make_account(3)],
+            tmp_path,
+        )
+        app = make_app(fake, watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            grid = app.screen.query_one("#meters", MetersGrid)
+            cards = list(grid.query(MeterCard))
+            accounts = app.snapshot.accounts
+            assert [c.acc.number for c in cards] == [a.number for a in accounts]
+
+            width, height = grid.size.width, grid.size.height
+            ncols, card_width, bar_height = meter_grid_dims(width, height, 3)
+            reference = meters_grid_text(
+                accounts, width, height, cursor=None, now=1_000.0,
+                flashed=set(), palette=Palette.from_theme(app.current_theme),
+            ).plain.split("\n")
+            origin = grid.content_region
+            for i, card in enumerate(cards):
+                x = card.region.x - origin.x
+                y = card.region.y - origin.y
+                assert (x, y) == (
+                    (i % ncols) * (card_width + 1),
+                    (i // ncols) * (bar_height + widgets.CARD_CHROME + 1),
+                )
+                lines = card.render().plain.split("\n")
+                assert lines == [
+                    reference[y + j][x : x + card_width] for j in range(len(lines))
+                ]
+
+    async def test_animation_and_cursor_repaint_only_the_cards_they_touch(
+        self, tmp_path, monkeypatch
+    ):
+        """One breathing frame repaints one card, a handoff sweep two, a cursor
+        move the old and the new card, and none of them asks for a relayout,
+        which would re-run the grid for every card on every frame."""
+        from claude_swap.tui.widgets import MeterCard, MetersGrid
+
+        repaints: list[tuple[str, bool]] = []
+        orig = MeterCard.refresh
+
+        def spy(self, *args, **kwargs):
+            repaints.append((self.acc.number, bool(kwargs.get("layout"))))
+            return orig(self, *args, **kwargs)
+
+        monkeypatch.setattr(MeterCard, "refresh", spy)
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2), make_account(3)],
+            tmp_path,
+        )
+        app = make_app(fake, watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            grid = app.screen.query_one("#meters", MetersGrid)
+
+            repaints.clear()
+            grid.set_predicted("2", 0.5)
+            grid._advance_frame(now=1_000.0)
+            grid._advance_frame(now=1_000.1)
+            assert repaints == [("2", False)] * 3  # arm + two frames
+
+            repaints.clear()
+            grid.set_predicted(None, 0.0)
+            assert repaints == [("2", False)]  # back to the resting frame
+
+            repaints.clear()
+            grid.start_sweep("1", "3", now=2_000.0)
+            grid._advance_frame(now=2_000.1)
+            assert sorted(repaints) == [("1", False)] * 2 + [("3", False)] * 2
+
+            repaints.clear()
+            grid.cursor = 1
+            grid.cursor = 2
+            assert repaints == [("2", False), ("2", False), ("3", False)]
+
     async def test_grid_content_fits_small_terminal_without_clipping(self, tmp_path):
         fake = FakeSwitcher(
             [make_account(1, active=True), make_account(2), make_account(3)],
@@ -1189,12 +1282,27 @@ class TestMeterWatchScreen:
             await pilot.pause()
             from claude_swap.tui.widgets import MetersGrid
 
+            from claude_swap.tui.widgets import MeterCard
+
             grid = app.screen.query_one("#meters", MetersGrid)
             assert grid._ncols() == 2
-            rendered_lines = grid.render().plain.count("\n") + 1
-            assert rendered_lines <= grid.size.height
+            cards = list(grid.query(MeterCard))
+            assert len(cards) == 3
+            for card in cards:
+                assert card.region in grid.content_region  # nothing clipped
 
-    async def test_grid_fallback_cursor_moves_through_compact_list(self, tmp_path):
+    async def test_grid_fallback_cursor_moves_through_compact_list(
+        self, tmp_path, monkeypatch
+    ):
+        """Too small for cards: each card renders as the one-line row of the
+        compact fallback, stacked in one column with no gutter."""
+        from claude_swap.tui import widgets
+        from claude_swap.tui.theme import Palette
+        from claude_swap.tui.widgets import (
+            MeterCard, MetersGrid, _compact_fallback_text,
+        )
+
+        monkeypatch.setattr(widgets.time, "time", lambda: 1_000.0)
         fake = FakeSwitcher(
             [make_account(1, active=True), make_account(2), make_account(3)],
             tmp_path,
@@ -1206,17 +1314,54 @@ class TestMeterWatchScreen:
             await pilot.pause()
             await pilot.press("s")
             await pilot.pause()
-            from claude_swap.tui.widgets import MetersGrid
 
             grid = app.screen.query_one("#meters", MetersGrid)
             assert grid._ncols() == 1  # fallback list is effectively one column
             assert grid.cursor == 0
-            rendered_lines = grid.render().plain.count("\n") + 1
-            assert rendered_lines <= grid.size.height
+            cards = list(grid.query(MeterCard))
+            origin = grid.content_region
+            reference = _compact_fallback_text(
+                app.snapshot.accounts, grid.size.width, grid.size.height,
+                cursor=0, now=1_000.0, flashed=set(),
+                palette=Palette.from_theme(app.current_theme),
+            )
+            assert [c.region.y - origin.y for c in cards] == [0, 1, 2]
+            assert [c.render().plain for c in cards] == reference.plain.split("\n")
+            assert cards[0].render().spans == reference.split("\n")[0].spans
+
             await pilot.press("j")  # down moves to the next account in the list
             await pilot.pause()
             assert grid.cursor == 1
             assert grid.selected_number() == "2"
+
+    async def test_compact_grid_windows_the_cards_around_the_cursor(self, tmp_path):
+        """Fifteen accounts in a ten-row viewport: only a window of cards is
+        shown, and it follows the cursor so Enter never targets a hidden one."""
+        from claude_swap.tui.widgets import MeterCard, MetersGrid
+
+        fake = FakeSwitcher(_many_meter_accounts(15), tmp_path)
+        app = make_app(fake, watch_style="meters")
+        async with app.run_test(size=(80, 11)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            grid = app.screen.query_one("#meters", MetersGrid)
+            rows = grid.size.height
+            assert rows < 15
+
+            def visible():
+                return [c.acc.number for c in grid.query(MeterCard) if c.display]
+
+            assert visible() == [str(i) for i in range(1, rows + 1)]
+            for _ in range(14):
+                await pilot.press("j")
+            await pilot.pause()
+            assert grid.selected_number() == "15"
+            assert visible() == [str(i) for i in range(16 - rows, 16)]
+            assert all(c.region in grid.content_region
+                       for c in grid.query(MeterCard) if c.display)
 
     async def test_selection_anchors_to_active_after_pre_snapshot_arm(self, tmp_path):
         """``s`` pressed before the initial snapshot lands must still end up
@@ -1261,6 +1406,104 @@ class TestMeterWatchScreen:
             assert grid.cursor is not None
             assert grid.cursor < len(shrunk.accounts)
 
+    async def test_grid_shows_a_note_while_loading_and_with_no_accounts(
+        self, tmp_path
+    ):
+        import threading
+
+        class BlockingFakeSwitcher(FakeSwitcher):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.release = threading.Event()
+
+            def accounts_snapshot(self, fetch=None):
+                self.release.wait(5)
+                return super().accounts_snapshot(fetch)
+
+        from textual.widgets import Static
+        from claude_swap.tui.widgets import MeterCard, MetersGrid
+
+        fake = BlockingFakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake, watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.press("w")
+            await pilot.pause()
+            grid = app.screen.query_one("#meters", MetersGrid)
+            note = grid.query_one("#meters-note", Static)
+            assert app.snapshot is None
+            assert note.display is True
+            assert note.region.width > 0 and note.region in grid.content_region
+            assert str(note.render()) == "loading…"
+
+            fake.release.set()
+            await settle(pilot)
+            assert note.display is False
+            assert len(grid.query(MeterCard)) == 1
+
+            app.snapshot = dataclasses.replace(app.snapshot, accounts=())
+            await pilot.pause()
+            assert note.display is True
+            assert note.region.width > 0
+            assert str(note.render()) == "No managed accounts yet."
+            assert not any(c.display for c in grid.query(MeterCard))
+
+    async def test_compact_line_grows_with_its_content_on_a_snapshot(self, tmp_path):
+        """A compact card is auto-width; an in-place snapshot update that
+        lengthens the line must relayout, or the new text gets ellipsised."""
+        from claude_swap.tui.widgets import MeterCard, MetersGrid
+
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2, email="a@example.com"),
+             make_account(3)],
+            tmp_path,
+        )
+        app = make_app(fake, watch_style="meters")
+        async with app.run_test(size=(60, 12)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            grid = app.screen.query_one("#meters", MetersGrid)
+            assert grid._compact
+            card = list(grid.query(MeterCard))[1]
+            before = card.region.width
+            longer = dataclasses.replace(
+                app.snapshot.accounts[1], email="a-much-longer-name@example.com"
+            )
+            app.snapshot = dataclasses.replace(
+                app.snapshot,
+                accounts=(app.snapshot.accounts[0], longer, app.snapshot.accounts[2]),
+            )
+            await pilot.pause()
+            assert card.acc is longer
+            assert card.region.width == len(card.render().plain) > before
+
+    async def test_rebuilt_cards_never_share_the_grid_with_the_old_ones(self, tmp_path):
+        """Old cards are hidden the moment a rebuild starts, so a layout that
+        runs before the prune completes shows only the new order."""
+        from claude_swap.tui.widgets import MeterCard, MetersGrid
+
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2), make_account(3)],
+            tmp_path,
+        )
+        app = make_app(fake, watch_style="meters")
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            grid = app.screen.query_one("#meters", MetersGrid)
+            grid.set_predicted("2", 0.5)
+            grid._advance_frame(now=1_000.0)  # a visibly lit frame on card 2
+            accts = app.snapshot.accounts
+            app.snapshot = dataclasses.replace(
+                app.snapshot, accounts=(accts[2], accts[0], accts[1])
+            )
+            # No pause: the old cards may still be pruning.
+            shown = [c for c in grid.query(MeterCard) if c.display]
+            assert [c.acc.number for c in shown] == ["3", "1", "2"]
+            # The rebuilt predicted card already wears this frame's colour.
+            assert shown[2].frame_style is not None
+
     async def test_armed_cursor_follows_account_across_reorder(self, tmp_path):
         """An external move/swap that reorders accounts while selection is
         armed must keep the cursor on the *same account*, not the same slot —
@@ -1292,6 +1535,23 @@ class TestMeterWatchScreen:
             app.snapshot = reordered
             await pilot.pause()
             assert grid.selected_number() == selected  # still on account "2"
+
+            # The rebuilt cards sit in the DOM (and so on screen) in the new
+            # order, in the same cells the reference layout would use.
+            from claude_swap.tui.widgets import CARD_CHROME, MeterCard, meter_grid_dims
+
+            cards = list(grid.query(MeterCard))
+            assert [c.acc.number for c in cards] == ["3", "1", "2"]
+            assert [c.marked for c in cards] == [False, False, True]
+            ncols, card_width, bar_height = meter_grid_dims(
+                grid.size.width, grid.size.height, 3
+            )
+            origin = grid.content_region
+            for i, card in enumerate(cards):
+                assert (card.region.x - origin.x, card.region.y - origin.y) == (
+                    (i % ncols) * (card_width + 1),
+                    (i // ncols) * (bar_height + CARD_CHROME + 1),
+                )
 
     async def test_s_arms_selection_switch_stays_watching(self, tmp_path):
         fake = self._fake(tmp_path)
@@ -2932,6 +3192,32 @@ def test_meter_card_stale_dims_bars_and_percent():
 
     assert any("dim" in str(sp.style) for sp in stale_card.spans)
     assert not any("dim" in str(sp.style) for sp in fresh_card.spans)
+
+
+def test_meter_card_widget_renders_the_meter_card_reference(monkeypatch):
+    """One MeterCard widget per account paints exactly what ``meter_card``
+    paints for it, cursor mark included, so only that widget has to repaint
+    when its frame changes."""
+    from claude_swap.tui import widgets
+    from claude_swap.tui.theme import Palette
+    from claude_swap.tui.widgets import MeterCard, _mark_cursor, meter_card
+
+    monkeypatch.setattr(widgets.time, "time", lambda: 1_000.0)
+    acc = make_account(2, email="peer@example.com", entry=make_entry(pct5=40.0, pct7=20.0))
+    card = MeterCard(acc, palette=Palette.DARK)
+    card.card_width, card.bar_height = 21, 5
+
+    reference = meter_card(acc, 21, 5, now=1_000.0)
+    assert card.render().plain == reference.plain
+    assert card.render().spans == reference.spans
+
+    card.frame_style = "#ff00ff"
+    card.flash = True
+    styled = meter_card(acc, 21, 5, now=1_000.0, flash=True, frame_style="#ff00ff")
+    assert card.render().spans == styled.spans
+
+    card.marked = True
+    assert card.render().spans == _mark_cursor(styled, 21).spans
 
 
 def test_meter_card_flash_highlights_top_border():

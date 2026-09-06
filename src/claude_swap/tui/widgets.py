@@ -15,7 +15,9 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from rich.text import Text
+from textual.app import ComposeResult
 from textual.timer import Timer
+from textual.widget import Widget
 from textual.widgets import ListItem, Static
 
 from claude_swap import pace
@@ -661,15 +663,30 @@ def _compact_fallback_text(
     for i, acc in enumerate(window, start=top):
         if i > top:
             text.append("\n")
-        line = mini_account_text(acc, now, palette=palette)
-        if len(line.plain) > width:
-            line = line[:width]
-        if i == cursor or acc.number in flashed:
-            line = line.copy()
-            prefix_len = len(f"{acc.number:>2}") + 2
-            line.stylize(palette.accent, 0, prefix_len)
-        text.append(line)
+        text.append(
+            compact_account_line(
+                acc, width, now=now,
+                accent=i == cursor or acc.number in flashed, palette=palette,
+            )
+        )
     return text
+
+
+def compact_account_line(
+    acc: AccountSnapshot, width: int, *, now: float, accent: bool,
+    palette: Palette = Palette.DARK,
+) -> Text:
+    """One account's row in the compact fallback: :func:`mini_account_text`
+    clipped to ``width``; ``accent`` colours its number prefix, standing in
+    for the card border the cursor or a flash would otherwise highlight."""
+    line = mini_account_text(acc, now, palette=palette)
+    if len(line.plain) > width:
+        line = line[:width]
+    if accent:
+        line = line.copy()
+        prefix_len = len(f"{acc.number:>2}") + 2
+        line.stylize(palette.accent, 0, prefix_len)
+    return line
 
 
 def meters_grid_text(
@@ -943,14 +960,69 @@ def _active_index(snap: AccountsSnapshot) -> int:
     )
 
 
-class MetersGrid(Static):
+class MeterCard(Static):
+    """One account's framed meter card. Owns nothing but its own props, so
+    the grid can repaint a single card (cursor, flash, breathing frame)
+    without re-rendering the whole screen."""
+
+    DEFAULT_CSS = """
+    MeterCard { width: auto; height: auto; }
+    """
+
+    def __init__(self, acc: AccountSnapshot, *, palette: Palette) -> None:
+        super().__init__()
+        self.acc = acc
+        self.palette = palette
+        self.card_width = 0
+        self.bar_height = 0
+        self.compact = False  # render as one compact-fallback line instead
+        self.flash = False
+        self.marked = False
+        self.frame_style: str | None = None
+
+    def render(self) -> Text:
+        if self.compact:
+            return compact_account_line(
+                self.acc, self.card_width, now=time.time(),
+                accent=self.marked or self.flash, palette=self.palette,
+            )
+        card = meter_card(
+            self.acc,
+            self.card_width,
+            self.bar_height,
+            now=time.time(),
+            flash=self.flash,
+            palette=self.palette,
+            frame_style=self.frame_style,
+        )
+        if self.marked:
+            card = _mark_cursor(card, self.card_width, self.palette)
+        return card
+
+
+class MetersGrid(Widget):
     """The watch screen's tiled vertical-meter grid, with a keyboard-navigable
-    cursor over the accounts."""
+    cursor over the accounts.
+
+    A container of one :class:`MeterCard` per account rather than a single
+    renderable: every state change (cursor, flash, breathing frame, handoff
+    sweep) repaints only the cards it touches, so a 10 Hz animation frame
+    costs one card, not the whole screen."""
+
+    DEFAULT_CSS = """
+    MetersGrid {
+        layout: grid;
+        grid-rows: auto;
+        grid-columns: auto;
+    }
+    MetersGrid > #meters-note { width: 1fr; height: auto; }
+    """
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
-        self.cursor: int | None = None
+        self._cursor: int | None = None
         self._numbers: list[str] = []
+        self._cards: list[MeterCard] = []  # one per account, in grid order
         self._stamps: dict[str, float | None] = {}
         self._flash: set[str] = set()
         self._flash_gen: dict[str, int] = {}
@@ -965,6 +1037,27 @@ class MetersGrid(Static):
         # is being swept across the cards; a newer switch simply replaces it.
         self._sweep: tuple[str | None, str, float] | None = None
 
+    def compose(self) -> ComposeResult:
+        yield Static("", id="meters-note")
+
+    @property
+    def cursor(self) -> int | None:
+        return self._cursor
+
+    @cursor.setter
+    def cursor(self, value: int | None) -> None:
+        self._cursor = value
+        self._sync_marks()
+        if self._compact:
+            self._apply_window()
+
+    def _sync_marks(self) -> None:
+        for i, card in enumerate(self._cards):
+            marked = i == self._cursor
+            if card.marked != marked:
+                card.marked = marked
+                card.refresh()
+
     def set_predicted(self, number: str | None, urgency: float) -> None:
         """Highlight ``number`` as the predicted next-switch target (``None``
         clears it); ``urgency`` in 0..1 sets the breathing tempo."""
@@ -975,7 +1068,7 @@ class MetersGrid(Static):
             self._phase = 0.0
         self._sync_animation()
         if changed:
-            self.refresh(layout=True)
+            self._paint_frames()
 
     def start_sweep(
         self, from_number: str | None, to_number: str, *, now: float | None = None
@@ -984,7 +1077,7 @@ class MetersGrid(Static):
         to muted while the new active card's frame rises to green."""
         self._sweep = (from_number, to_number, time.time() if now is None else now)
         self._sync_animation()
-        self.refresh(layout=True)
+        self._paint_frames(now)
 
     def _compact_window(self) -> int:
         """First account to show in the compact list: the window moves only
@@ -1020,7 +1113,7 @@ class MetersGrid(Static):
         if self._sweep is not None and now - self._sweep[2] >= _SWEEP_S:
             self._sweep = None
             self._sync_animation()
-        self.refresh()
+        self._paint_frames(now)
 
     def frame_styles(self, palette: Palette, now: float) -> dict[str, str]:
         """Per-account frame colours for this frame: the predicted target
@@ -1042,15 +1135,113 @@ class MetersGrid(Static):
             )
         return styles
 
+    def _paint_frames(self, now: float | None = None) -> None:
+        """Push this frame's colours to the cards, repainting only those
+        whose frame actually changed."""
+        if not self._cards:
+            return
+        now = time.time() if now is None else now
+        styles = self.frame_styles(self._palette(), now)
+        for card in self._cards:
+            style = styles.get(card.acc.number)
+            if card.frame_style != style:
+                card.frame_style = style
+                card.refresh()
+
+    def _palette(self) -> Palette:
+        app: "CswapApp" = self.app  # type: ignore[assignment]
+        return Palette.from_theme(app.current_theme)
+
     def on_mount(self) -> None:
         self.watch(self.app, "snapshot", self._on_snapshot)
-        self.watch(self.app, "theme", lambda _t: self.refresh(layout=True))
+        self.watch(self.app, "theme", self._on_theme)
+
+    def on_resize(self) -> None:
+        self._apply_layout()
+
+    def _on_theme(self, _theme: str) -> None:
+        palette = self._palette()
+        for card in self._cards:
+            card.palette = palette
+        self._apply_layout()  # repaints every card in the new palette
 
     def _on_snapshot(self, snap: AccountsSnapshot | None) -> None:
         if snap is not None:
             self._anchor_cursor(snap)
             self._flash_updated(snap)
-        self.refresh(layout=True)
+        self._reconcile_cards(snap)
+        self._apply_layout()
+
+    def _reconcile_cards(self, snap: AccountsSnapshot | None) -> None:
+        """Keep one card per account, in snapshot order. Same membership and
+        order (every routine poll) updates the cards in place; anything else
+        rebuilds them, which is rare enough not to need a smarter diff."""
+        accounts = list(snap.accounts) if snap is not None else []
+        numbers = [acc.number for acc in accounts]
+        if numbers == [card.acc.number for card in self._cards]:
+            for card, acc in zip(self._cards, accounts):
+                card.acc = acc
+                card.flash = acc.number in self._flash
+                card.refresh()
+            self._sync_marks()
+            return
+        palette = self._palette()
+        self.remove_children(MeterCard)
+        self._cards = [MeterCard(acc, palette=palette) for acc in accounts]
+        for i, card in enumerate(self._cards):
+            card.flash = card.acc.number in self._flash
+            card.marked = i == self._cursor
+        self.mount_all(self._cards)
+
+    def _dims(self) -> tuple[int, int, int, bool]:
+        """(columns, card width, bar height, compact) for the current size."""
+        n = len(self._cards)
+        ncols, card_width, bar_height = meter_grid_dims(
+            self.size.width, self.size.height, n
+        )
+        compact = not _cards_fit(ncols, bar_height, self.size.height, n)
+        return ncols, card_width, bar_height, compact
+
+    def _apply_layout(self) -> None:
+        """Size the cards and the grid for the current viewport; called on
+        resize and whenever the account list changes."""
+        note = self.query_one("#meters-note", Static)
+        app: "CswapApp" = self.app  # type: ignore[assignment]
+        if app.snapshot is None:
+            note.update(Text("loading…", style=self._palette().muted))
+        elif not self._cards:
+            note.update(Text("No managed accounts yet.", style=self._palette().muted))
+        note.display = not self._cards
+        if not self._cards or self.size.width == 0:
+            return
+        ncols, card_width, bar_height, compact = self._dims()
+        self.set_compact(compact)
+        self._compact_rows = self.size.height
+        if compact:
+            ncols, card_width, bar_height = 1, self.size.width, 0
+        self.styles.grid_size_columns = ncols
+        self.styles.grid_gutter_horizontal = 0 if compact else 1
+        self.styles.grid_gutter_vertical = 0 if compact else 1
+        for card in self._cards:
+            card.compact = compact
+            card.card_width, card.bar_height = card_width, bar_height
+            if compact:
+                card.frame_style = None  # no frame to animate on a line
+            card.refresh(layout=True)
+        self._apply_window()
+        if not compact:
+            self._paint_frames()  # rebuilt or re-themed cards get this frame now
+
+    def _apply_window(self) -> None:
+        """Show only the compact window's cards; every card when framed."""
+        if self._compact:
+            top = self._compact_window()
+            rows = max(1, self._compact_rows)
+            for i, card in enumerate(self._cards):
+                card.display = top <= i < top + rows
+        else:
+            for card in self._cards:
+                card.display = True
 
     def _anchor_cursor(self, snap: AccountsSnapshot) -> None:
         """Keep an armed cursor pointed at a real account.
@@ -1065,21 +1256,21 @@ class MetersGrid(Static):
         if that account is gone, the cursor clamps back into range.
         """
         numbers = [acc.number for acc in snap.accounts]
-        if self.cursor is not None:
+        if self._cursor is not None:
             if not self._numbers:
-                self.cursor = _active_index(snap) if numbers else None
+                self._cursor = _active_index(snap) if numbers else None
             elif numbers != self._numbers:
                 selected = (
-                    self._numbers[self.cursor]
-                    if 0 <= self.cursor < len(self._numbers)
+                    self._numbers[self._cursor]
+                    if 0 <= self._cursor < len(self._numbers)
                     else None
                 )
                 if selected in numbers:
-                    self.cursor = numbers.index(selected)
+                    self._cursor = numbers.index(selected)
                 elif numbers:
-                    self.cursor = min(self.cursor, len(numbers) - 1)
+                    self._cursor = min(self._cursor, len(numbers) - 1)
                 else:
-                    self.cursor = None
+                    self._cursor = None
         self._numbers = numbers
 
     def _flash_updated(self, snap: AccountsSnapshot) -> None:
@@ -1106,66 +1297,29 @@ class MetersGrid(Static):
         if self._flash_gen.get(number) != generation:
             return  # a newer re-flash owns this card now; leave it lit
         self._flash.discard(number)
-        self.refresh(layout=True)
-
-    def render(self) -> Text:
-        app: "CswapApp" = self.app  # type: ignore[assignment]
-        palette = Palette.from_theme(app.current_theme)
-        snap = app.snapshot
-        if snap is None:
-            return Text("loading…", style=palette.muted)
-        if not snap.accounts:
-            return Text("No managed accounts yet.", style=palette.muted)
-        now = time.time()
-        ncols, _card_width, bar_height = meter_grid_dims(
-            self.size.width, self.size.height, len(snap.accounts)
-        )
-        self.set_compact(
-            not _cards_fit(ncols, bar_height, self.size.height, len(snap.accounts))
-        )
-        self._compact_rows = self.size.height
-        return meters_grid_text(
-            snap.accounts,
-            self.size.width,
-            self.size.height,
-            cursor=self.cursor,
-            now=now,
-            flashed=self._flash,
-            palette=palette,
-            frame_styles=self.frame_styles(palette, now),
-            compact_top=self._compact_window(),
-        )
+        for card in self._cards:
+            if card.acc.number == number and card.flash:
+                card.flash = False
+                card.refresh()
 
     def _ncols(self) -> int:
-        app: "CswapApp" = self.app  # type: ignore[assignment]
-        snap = app.snapshot
-        n = len(snap.accounts) if snap else 0
-        if n == 0:
+        if not self._cards:
             return 1
-        ncols, _card_width, bar_height = meter_grid_dims(
-            self.size.width, self.size.height, n
-        )
-        if not _cards_fit(ncols, bar_height, self.size.height, n):
+        ncols, _card_width, _bar_height, compact = self._dims()
+        if compact:
             return 1  # compact fallback renders as a single vertical column
         return ncols
 
     def move_cursor(self, dx: int, dy: int) -> None:
-        app: "CswapApp" = self.app  # type: ignore[assignment]
-        snap = app.snapshot
-        n = len(snap.accounts) if snap else 0
+        n = len(self._cards)
         if n == 0:
             return
         self.cursor = grid_move(self.cursor or 0, dx, dy, self._ncols(), n)
-        self.refresh(layout=True)
 
     def selected_number(self) -> str | None:
-        app: "CswapApp" = self.app  # type: ignore[assignment]
-        snap = app.snapshot
-        if snap is None or self.cursor is None:
+        if self.cursor is None or not 0 <= self.cursor < len(self._cards):
             return None
-        if not 0 <= self.cursor < len(snap.accounts):
-            return None
-        return snap.accounts[self.cursor].number
+        return self._cards[self.cursor].acc.number
 
 
 class AccountCard(Static):
