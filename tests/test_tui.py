@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import math
 import sys
 import threading
 import time
@@ -3558,7 +3559,7 @@ def test_meters_grid_animates_only_while_a_target_is_predicted():
     assert grid.predicted == "2"
     assert len(grid.intervals) == 1 and not grid.intervals[0][1].stopped
 
-    grid.set_predicted("3", 0.5)  # retarget reuses the running interval
+    grid.set_predicted("3", 0.2)  # retarget at the same tempo reuses the interval
     assert len(grid.intervals) == 1
 
     grid.set_predicted(None, 0.0)
@@ -3579,7 +3580,7 @@ def test_predicted_card_frame_breathes_between_muted_and_accent():
     assert set(at_rest) == {"2"}
     assert at_rest["2"] == palette.muted  # phase 0: starts from the resting frame
 
-    for _ in range(10):  # half a slow period (2.0s at 0.1s frames)
+    for _ in range(5):  # half a slow period (2.0s at 0.2s rest frames)
         grid._advance_frame()
     at_peak = grid.frame_styles(palette, now=0.0)["2"]
     assert at_peak == palette.accent  # phase pi: fully lit
@@ -3587,7 +3588,7 @@ def test_predicted_card_frame_breathes_between_muted_and_accent():
         palette.muted, palette.accent
     )  # the ramp really passes through intermediate colours
 
-    for _ in range(10):
+    for _ in range(5):
         grid._advance_frame()
     assert grid.frame_styles(palette, now=0.0)["2"] == palette.muted  # back down
 
@@ -3619,12 +3620,36 @@ def test_urgency_speeds_up_the_breathing():
     grid = _animatable_grid()
     grid.set_predicted("2", 0.0)
     grid._advance_frame()
-    slow_step = grid._phase
+    slow_rate = grid._phase / grid._anim_dt  # radians per second
 
     grid.set_predicted("3", 1.0)  # retarget resets the phase
     assert grid._phase == 0.0
     grid._advance_frame()
-    assert grid._phase > slow_step * 3  # 0.6s period vs 2.0s: >3x faster
+    fast_rate = grid._phase / grid._anim_dt
+    assert fast_rate > slow_rate * 3  # 0.6s period vs 2.0s: >3x faster
+
+
+def test_breathing_rests_at_five_hz_and_speeds_up_when_urgent():
+    """Far from the threshold the card breathes slowly, so half the frames
+    are enough; urgency and a handoff sweep run at the full 10 Hz."""
+    from claude_swap.tui.widgets import _ANIM_DT, _ANIM_DT_REST
+
+    grid = _animatable_grid()
+    grid.set_predicted("2", 0.0)
+    assert grid.intervals[-1][0] == _ANIM_DT_REST == 0.2
+    grid._advance_frame()
+    assert grid._phase == pytest.approx(math.tau * 0.2 / 2.0)  # a real 0.2s step
+
+    grid.set_predicted("2", 0.9)  # urgent: retime the interval
+    assert grid.intervals[0][1].stopped
+    assert grid.intervals[-1][0] == _ANIM_DT == 0.1
+
+    grid.set_predicted("2", 0.1)  # calm again: back to the rest tempo
+    assert grid.intervals[-1][0] == _ANIM_DT_REST
+
+    grid.start_sweep("1", "2", now=0.0)  # a sweep always runs at 10 Hz
+    assert grid.intervals[-1][0] == _ANIM_DT
+    assert sum(not t.stopped for _p, t in grid.intervals) == 1  # one live timer
 
 
 def test_compact_fallback_does_not_animate():

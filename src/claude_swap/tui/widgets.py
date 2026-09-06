@@ -42,7 +42,9 @@ _FLASH_S = 1.5  # how long a just-refreshed card's border stays highlighted
 # something to animate. The predicted next-switch target's frame "breathes"
 # between muted and accent; the period shrinks as the active account nears
 # the threshold.
-_ANIM_DT = 0.1  # seconds between animation frames
+_ANIM_DT = 0.1  # seconds between animation frames while something moves fast
+_ANIM_DT_REST = 0.2  # ... while the predicted card only breathes slowly
+_URGENT = 0.5  # urgency from which breathing runs at the full frame rate
 _BREATHE_SLOW_S = 2.0  # breathing period when a switch is far off
 _BREATHE_FAST_S = 0.6  # breathing period when a switch is imminent
 _SWEEP_S = 1.0  # handoff sweep: old active fades to muted, new one to green
@@ -1030,6 +1032,7 @@ class MetersGrid(Widget):
         self.urgency: float = 0.0  # 0 = far from the threshold … 1 = imminent
         self._phase: float = 0.0  # breathing phase, radians
         self._anim: Timer | None = None
+        self._anim_dt = _ANIM_DT  # period of the running interval
         self._compact = False  # compact fallback in use: no frames to animate
         self._compact_rows = 0  # viewport rows available to the compact list
         self._compact_top = 0  # first account the compact list shows
@@ -1100,16 +1103,27 @@ class MetersGrid(Widget):
         want = not self._compact and (
             self.predicted is not None or self._sweep is not None
         )
-        if want and self._anim is None:
-            self._anim = self.set_interval(_ANIM_DT, self._advance_frame)
+        dt = self._frame_dt()
+        if want and (self._anim is None or dt != self._anim_dt):
+            if self._anim is not None:
+                self._anim.stop()
+            self._anim = self.set_interval(dt, self._advance_frame)
+            self._anim_dt = dt
         elif not want and self._anim is not None:
             self._anim.stop()
             self._anim = None
 
+    def _frame_dt(self) -> float:
+        """Half the frames while the card breathes slowly; the full rate once
+        the switch is near or a handoff sweep is running."""
+        if self._sweep is not None or self.urgency >= _URGENT:
+            return _ANIM_DT
+        return _ANIM_DT_REST
+
     def _advance_frame(self, now: float | None = None) -> None:
         now = time.time() if now is None else now
         period = _BREATHE_SLOW_S - (_BREATHE_SLOW_S - _BREATHE_FAST_S) * self.urgency
-        self._phase = (self._phase + math.tau * _ANIM_DT / period) % math.tau
+        self._phase = (self._phase + math.tau * self._anim_dt / period) % math.tau
         if self._sweep is not None and now - self._sweep[2] >= _SWEEP_S:
             self._sweep = None
             self._sync_animation()
